@@ -53,4 +53,15 @@ Overlaps data security (tenant isolation and data-leak checks), the same broad a
 - Real exports routinely lacking credential names, which would leave most reports "Not verified".
 
 ## Verdict
-Pending triage at step 6.
+**Open source**, provisional until Emmanuel agrees (triage 2026-11-23). Bias checklist: 7 of 12 flags, so the scores stay low and nothing here counts as demand.
+
+| Item | Score | Evidence |
+| --- | --- | --- |
+| Severity | 2 | Paid Upwork posts (Nov 16-19, 2026) list "zero data crossover" and human review as requirements; repeated n8n forum threads on isolating client credentials; a forum write-up (Oct 30, 2026) of two successful requests hitting the wrong customers; Intuit's 2026 survey: 3 in 5 accountants say clients ask for proof of AI data protection always or frequently. Desk research, so capped at 2. |
+| Willingness to pay | 1 | Firms pay for isolated builds, not for a checker. No spend on anything like this found. |
+| Distribution | 1 | The n8n forum, r/n8n and Upwork freelancers are open channels, and other free linters got replies there. Nothing has been posted yet. |
+| Edge | 2 | n8n's audit and four free linters don't check client boundaries at all. The common alternative, one n8n instance per client, removes most cross-client risk but costs a server per client, and it doesn't catch writes that skip approval. |
+| Hosted value | 1 | A preflight check run before go-live. It runs in the browser, so hosting it adds little. |
+| Upkeep | 3 | A static file with no server or API cost. Node-type changes in n8n are the only maintenance. |
+
+Rule 2 applies: the people who'd run it are automation builders, running locally is the advantage, and hosted value is 1.

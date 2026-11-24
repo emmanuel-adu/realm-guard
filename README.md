@@ -8,21 +8,23 @@ If you run automations for a bunch of clients, it only takes one copied workflow
 
 ## Try it
 
-The whole app is one HTML file. Nothing gets uploaded, there's no server, and it works offline.
-
-- Grab `index.html` from the latest build, open it in a browser, and drop in a workflow. Or click one of the three samples.
-- Or run it locally:
+The whole app is one HTML file with no server behind it, so nothing gets uploaded and it works offline. Build it once and open the file in any browser, then drop in a workflow or click one of the three samples:
 
 ```bash
 npm ci
-npm run dev
+npm run build   # writes dist/index.html
+npm run dev     # or work on it with hot reload
 ```
 
 ## What you give it
 
-**A workflow export.** In n8n, open the workflow, then use the ... menu and Download. Copying all nodes on the canvas works too. Template-site downloads usually strip credential names, and the report will tell you it couldn't verify those steps.
+### The workflow export
 
-**A client manifest (optional).** This tells Realm Guard which n8n credential and which QuickBooks company belongs to which client. You don't have to write it from scratch: drop the workflow in and click "Draft from this workflow".
+In n8n, open the workflow, then use the ... menu and Download. Copying all nodes on the canvas works too. Template-site downloads usually strip credential names, and the report will tell you it couldn't verify those steps.
+
+### The client manifest (optional)
+
+This tells Realm Guard which n8n credential and which QuickBooks company belongs to which client. You don't have to write it from scratch: drop the workflow in and click "Draft from this workflow".
 
 ```yaml
 version: 1
@@ -43,7 +45,7 @@ approvalNodes: ["Airtable review queue"]
 
 JSON works too. Realm IDs keep every digit even if you don't quote them.
 
-Without a manifest you still get the agent, approval and state checks. Each credential or company ID is treated as its own client, so a flow from one company into another still shows up. You just won't get a clean bill of health.
+Without a manifest you still get the agent, approval and state checks. Each credential or company ID is treated as its own client, so a flow from one company into another still shows up, but the verdict can't come out better than "Not verified".
 
 ## What it checks
 
