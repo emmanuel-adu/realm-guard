@@ -19,12 +19,12 @@ describe("parseWorkflow", () => {
     const w = ok(wf("Invoices").node({ name: "Start", type: T.manual }).node({ name: "Get", type: T.qbo }).chain("Start", "Get").text());
     expect(w.name).toBe("Invoices");
     expect(w.nodes.map((n) => n.name)).toEqual(["Start", "Get"]);
-    expect(w.edges).toEqual([{ from: "Start", to: "Get", type: "main" }]);
+    expect(w.edges).toEqual([{ from: "Start", to: "Get", type: "main", output: 0 }]);
   });
 
   it("keeps ai_tool edges with their type", () => {
     const w = ok(wf().node({ name: "Tool", type: T.qboTool }).node({ name: "Agent", type: T.agent }).connect("Tool", "Agent", "ai_tool").text());
-    expect(w.edges).toEqual([{ from: "Tool", to: "Agent", type: "ai_tool" }]);
+    expect(w.edges).toEqual([{ from: "Tool", to: "Agent", type: "ai_tool", output: 0 }]);
   });
 
   it("normalizes all three credential shapes found in real exports", () => {

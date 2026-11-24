@@ -1,4 +1,5 @@
 import { type Context, type Resolved, credentialKey } from "./context";
+import { answerKeys, approvedOutputs } from "./decisions";
 import { isExpression, referencedNodes, usesFromAI, usesIncomingItem } from "./expressions";
 import { approvalKind, codeOf, isAgent, isAiNode, isCodeNode, isDecision, isHitlReview, isSticky, memoryKind, triggerKind } from "./nodes";
 import { credentialLabel } from "./quickbooks";
@@ -21,6 +22,18 @@ function groupBy<T>(items: T[], key: (t: T) => string | undefined): Map<string, 
     out.set(k, [...(out.get(k) ?? []), item]);
   }
   return out;
+}
+
+/** Where a run-time token comes from, in words. Never the expression: it can hold a real token. */
+function tokenSource(expr: string): string {
+  const parts = referencedNodes(expr).map(quote);
+  if (usesFromAI(expr)) parts.push("the AI model");
+  if (usesIncomingItem(expr)) parts.push("the incoming item");
+  if (/\$env\b/.test(expr)) parts.push("an environment variable");
+  if (/\$vars\b/.test(expr)) parts.push("a workflow variable");
+  if (/\$secrets\b/.test(expr)) parts.push("an external secret");
+  if (parts.length === 0) return "an expression";
+  return parts.length === 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1) ?? ""}`;
 }
 
 const credOf = (tp: Resolved) => (tp.auth.kind === "credential" && tp.auth.credential ? tp.auth.credential : undefined);
@@ -51,12 +64,13 @@ export function credentialRules(ctx: Context): Finding[] {
   }
 
   for (const tps of groupBy(ctx.touchpoints, credKey).values()) {
-    const first = tps[0];
-    const firstCred = first ? credOf(first) : undefined;
-    if (!firstCred) continue;
-    const label = credentialLabel(firstCred);
+    const refs = tps.flatMap((tp) => credOf(tp) ?? []);
+    const ref = refs.find((c) => c.name) ?? refs[0];
+    if (!ref) continue;
+    const label = credentialLabel(ref);
     const nodes = tps.map((tp) => tp.node.name);
-    const owners = tps[0]?.credTenants ?? [];
+    // Every reference counts, so the verdict doesn't depend on which node comes first.
+    const owners = tenancy.sort(tps.flatMap((tp) => tp.credTenants));
     if (manifest && owners.length === 0) {
       out.push({
         ruleId: "RG101",
@@ -112,22 +126,27 @@ export function credentialRules(ctx: Context): Finding[] {
         severity: pairedBy ? "medium" : "high",
         title: "Token is picked at run time",
         nodes: [tp.node.name],
+        // Names the sources only. The expression itself can hold part of a real token.
         detail: pairedBy
           ? `The Authorization header and the company ID both come from ${quote(pairedBy)}, which keeps them paired.`
-          : `The Authorization header is built from workflow data: \`${clip(tp.auth.expr)}\`.`,
+          : `The Authorization header is built at run time from ${tokenSource(tp.auth.expr)}.`,
         why: pairedBy
           ? "Nothing in the workflow proves that lookup returns the right client, so a bad client ID still sends the run to the wrong books."
           : "Which client's token gets used depends on each run's data. A bad client ID or a mixed-up lookup sends one client's token, and data, to another client's company.",
         fix: "Look up the token and the company ID in one step keyed by a single client ID, and reference both from that step. A stored n8n credential per client is safer still.",
       });
-    } else if (tp.auth.kind === "pasted-token") {
+    }
+    if (tp.auth.kind === "pasted-token" || tp.unusedPastedToken) {
       out.push({
         ruleId: "RG106",
         category: "credentials",
         severity: "high",
         title: "Access token pasted into the node",
         nodes: [tp.node.name],
-        detail: "The Authorization header holds a literal bearer token.",
+        detail:
+          tp.auth.kind === "pasted-token"
+            ? "The Authorization header holds a literal bearer token."
+            : "A header list the node no longer uses still holds a literal bearer token. It isn't sent, but it ships with every copy of the file.",
         why: "The token travels with every copy and export of this workflow, so anyone holding the file can call that client's QuickBooks.",
         fix: "Revoke the token in the Intuit developer portal, then use a stored QuickBooks credential instead.",
       });
@@ -239,12 +258,14 @@ export function crossClientRules(ctx: Context): Finding[] {
   const agents = new Set<string>();
   for (const n of graph.byName.values()) if (isAgent(n.type) || graph.agentTools(n.name).length > 0) agents.add(n.name);
   const agentTenants = new Map<string, Resolved[]>();
+  const callers = new Map<string, string[]>();
   for (const agent of agents) {
     const tools = graph.agentTools(agent).flatMap(({ tool }) => {
       const tp = byNode.get(tool);
       return tp ? [tp] : [];
     });
     agentTenants.set(agent, tools);
+    for (const t of tools) callers.set(t.node.name, [...(callers.get(t.node.name) ?? []), agent]);
     const tenants = new Set(tools.flatMap((t) => t.tenants));
     if (tenants.size < 2) continue;
     const writes = tools.some((t) => t.write);
@@ -260,25 +281,43 @@ export function crossClientRules(ctx: Context): Finding[] {
     });
   }
 
-  // Data read from one client's books reaching a write into another's.
-  for (const w of ctx.touchpoints) {
-    if (!w.write || w.tenants.length === 0 || w.kind === "quickbooks-tool" || w.kind === "http-tool") continue;
+  // Data read from one client's books reaching a write into another's. A tool write gets
+  // whatever its agent was handed, so the agent's own inputs count as the tool's.
+  const foreignSources = (w: Resolved, start: string): Resolved[] => {
     const sources: Resolved[] = [];
-    for (const anc of graph.dataSources(w.node.name)) {
+    for (const anc of graph.dataSources(start)) {
       const tp = byNode.get(anc);
       if (tp) sources.push(tp);
       sources.push(...(agentTenants.get(anc) ?? []));
     }
-    const foreign = sources.filter((s) => s.tenants.some((t) => !w.tenants.includes(t)));
+    return sources.filter((s) => s !== w && s.tenants.some((t) => !w.tenants.includes(t)));
+  };
+  for (const w of ctx.touchpoints) {
+    if (!w.write || w.tenants.length === 0) continue;
+    const isTool = w.kind === "quickbooks-tool" || w.kind === "http-tool";
+    let foreign = foreignSources(w, w.node.name);
+    let agent: string | undefined;
+    if (isTool) {
+      for (const a of callers.get(w.node.name) ?? []) {
+        const viaAgent = foreignSources(w, a);
+        if (viaAgent.length === 0) continue;
+        agent ??= a;
+        foreign = [...foreign, ...viaAgent];
+      }
+    }
+    foreign = [...new Set(foreign)];
     if (foreign.length === 0) continue;
     const from = new Set(foreign.flatMap((s) => s.tenants.filter((t) => !w.tenants.includes(t))));
+    const through = `${foreign.map((s) => quote(s.node.name)).join(", ")} (${tenancy.list(from)})`;
     out.push({
       ruleId: "RG301",
       category: "cross-client",
       severity: "critical",
       title: "One client's data flows into another client's books",
       nodes: [w.node.name, ...[...new Set(foreign.map((s) => s.node.name))]],
-      detail: `${quote(w.node.name)} ${verb(w)} ${tenancy.list(w.tenants)}'s books using data that passed through ${foreign.map((s) => quote(s.node.name)).join(", ")} (${tenancy.list(from)}).`,
+      detail: agent
+        ? `${quote(agent)} can call ${quote(w.node.name)}, which ${verb(w)} ${tenancy.list(w.tenants)}'s books, and the agent is handed data that passed through ${through}.`
+        : `${quote(w.node.name)} ${verb(w)} ${tenancy.list(w.tenants)}'s books using data that passed through ${through}.`,
       why: "Records from one client end up in another client's ledger: customer names, amounts, memos. That's a data leak and a bookkeeping error at once.",
       fix: "Split the flow so each run reads and writes one client's company, or filter by client ID before the write.",
     });
@@ -339,7 +378,7 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
   }
   const gates = new Set(kinds.keys());
   const trustedGates = new Set([...kinds].filter(([, k]) => k === "trusted").map(([n]) => n));
-  const decisions = new Set(nodes.filter((n) => isDecision(n.type)).map((n) => n.name));
+  const decisions = nodes.filter((n) => isDecision(n.type));
 
   // Entry points: triggers, plus main-flow nodes nothing feeds (a canvas copy or a
   // half-built workflow run with "Execute step").
@@ -349,7 +388,7 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
     if (kind) entries.set(n.name, kind);
   }
   for (const n of nodes) {
-    if (entries.has(n.name) || isSticky(n.type) || graph.mainParents(n.name).length > 0) continue;
+    if (entries.has(n.name) || isSticky(n.type) || graph.hasMainParent(n.name)) continue;
     const tp = ctx.byNode.get(n.name);
     const isTool = tp?.kind === "quickbooks-tool" || tp?.kind === "http-tool";
     if (!isTool && (graph.hasMainEdges(n.name) || tp)) entries.set(n.name, "manual");
@@ -363,13 +402,49 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
   for (const set of open.values()) for (const n of set) openAll.add(n);
 
   // n8n continues past an approval step whatever the answer, so what follows a gate counts
-  // as approved only once a decision node has checked it.
-  const undecided = new Map<string, string>();
+  // as approved only past an IF, Filter or Switch that reads the answer, on a branch that
+  // means yes. A check on anything else (the amount, the vendor) protects nothing.
+  const undecided = new Map<string, { gate: string; decision?: string }>();
+  // Gates of one kind share answer keys, so each IF is read once per kind, not once per gate.
+  const checksByKeys = new Map<string, Map<string, Set<number>>>();
   for (const [gate, kind] of kinds) {
     if (kind !== "needs-check") continue;
     const reached = entries.has(gate) || graph.mainParents(gate).some((p) => openAll.has(p));
     if (!reached) continue;
-    for (const n of graph.reach(graph.mainChildren(gate), new Set([...decisions, ...trustedGates]))) if (!undecided.has(n)) undecided.set(n, gate);
+    const gateNode = graph.node(gate);
+    if (!gateNode) continue;
+    const keys = answerKeys(gateNode);
+    const cacheKey = keys.join("\u0000");
+    let checks = checksByKeys.get(cacheKey);
+    if (!checks) {
+      checks = new Map<string, Set<number>>();
+      for (const d of decisions) {
+        const approved = approvedOutputs(d, keys);
+        if (approved) checks.set(d.name, approved);
+      }
+      checksByKeys.set(cacheKey, checks);
+    }
+    const gateChecks = checks;
+    const notYes = (d: string) => {
+      const approved = gateChecks.get(d);
+      return approved ? (o: number) => !approved.has(o) : undefined;
+    };
+    const start = graph.mainChildren(gate);
+    const unchecked = graph.reach(start, new Set([...trustedGates, ...checks.keys()]));
+    const anyBranch = graph.reach(start, trustedGates, notYes);
+    for (const n of unchecked) {
+      if (undecided.get(n)?.decision !== undefined || !undecided.has(n)) undecided.set(n, { gate });
+    }
+    // Name the check whose "no" branch reaches each remaining node. The stop set grows as
+    // nodes get a name, so the walks together visit each node once.
+    const named = new Set([...trustedGates, ...unchecked]);
+    for (const d of checks.keys()) {
+      if (!anyBranch.has(d)) continue;
+      for (const n of graph.reach(graph.mainChildren(d, notYes(d)), named, notYes)) {
+        named.add(n);
+        if (!undecided.has(n)) undecided.set(n, { gate, decision: d });
+      }
+    }
   }
 
   const aiOpen = nodes.filter((n) => isAiNode(n.type) && openAll.has(n.name));
@@ -423,18 +498,23 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
       continue;
     }
 
-    const gate = undecided.get(name);
-    if (gate) {
+    const pending = undecided.get(name);
+    if (pending) {
+      const { gate, decision } = pending;
       approvals.set(name, "unchecked");
       findings.push({
         ruleId: "RG403",
         category: "approvals",
         severity: "high",
-        title: "Approval answer is never checked",
-        nodes: [name, gate],
-        detail: `${quote(gate)} asks a person, but nothing checks the answer before ${quote(name)} (${tp.operation}).`,
+        title: decision ? "Write can run when the approval is declined" : "Approval answer is never checked",
+        nodes: decision ? [name, gate, decision] : [name, gate],
+        detail: decision
+          ? `${quote(gate)} asks a person and ${quote(decision)} checks the answer, but ${quote(name)} (${tp.operation}) is on a branch that doesn't mean yes.`
+          : `${quote(gate)} asks a person, but nothing checks the answer before ${quote(name)} (${tp.operation}).`,
         why: "n8n moves on to the next step whatever the person clicks, including Disapprove, a timeout or an error. The approval looks like a safeguard and stops nothing.",
-        fix: "Add an IF after the approval that continues only when it was approved (for Send and Wait, `{{ $json.data.approved }}` is true), and don't wire the approval's error output to the write.",
+        fix: decision
+          ? `Connect ${quote(name)} to the output of ${quote(decision)} that continues only when the answer is yes.`
+          : "Add an IF after the approval that continues only when it was approved (for Send and Wait, `{{ $json.data.approved }}` is true), and don't wire the approval's error output to the write.",
       });
       continue;
     }

@@ -279,3 +279,229 @@ describe("performance", () => {
     expect(performance.now() - t0).toBeLessThan(2000);
   });
 });
+
+// Second review: CodeRabbit on PR #1. Each test reproduced a false pass, a leak or a freeze.
+describe("decisions have to read the approver's answer", () => {
+  const ifNode = (name: string, conditions: unknown[], combinator = "and") => ({
+    name,
+    type: "n8n-nodes-base.if",
+    typeVersion: 2.2,
+    parameters: { conditions: { conditions, combinator } },
+  });
+  const approvedTrue = { leftValue: "={{ $json.data.approved }}", operator: { type: "boolean", operation: "true" } };
+  const approvedFalse = { leftValue: "={{ $json.data.approved }}", operator: { type: "boolean", operation: "false" } };
+  const bigAmount = { leftValue: "={{ $json.amount }}", rightValue: 1000, operator: { type: "number", operation: "gt" } };
+  const gated = (decision: { name: string; type: string; typeVersion: number; parameters: Record<string, unknown> }, output: number) =>
+    wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Approve", type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+      .node(decision)
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .chain("Daily", "Approve", decision.name)
+      .connect(decision.name, "Create A", "main", output);
+
+  it("RG403: an IF that checks something else doesn't stand in for the answer", () => {
+    const r = report(gated(ifNode("Big?", [bigAmount]), 0), onlyA);
+    expect(r.findings.find((f) => f.ruleId === "RG403")?.detail).toMatch(/nothing checks the answer/);
+  });
+
+  it("RG403: a write on the false branch of the approval check runs when the approver says no", () => {
+    const r = report(gated(ifNode("Approved?", [approvedTrue]), 1), onlyA);
+    const f = r.findings.find((x) => x.ruleId === "RG403");
+    expect(f?.nodes).toEqual(["Create A", "Approve", "Approved?"]);
+    expect(f?.title).toMatch(/declined/i);
+  });
+
+  it("passes a write on the false branch of a check for a decline", () => {
+    expect(report(gated(ifNode("Declined?", [approvedFalse]), 1), onlyA).verdict).toBe("clear");
+  });
+
+  it("RG403: an OR with an unrelated condition can let a declined run through the true branch", () => {
+    expect(ids(report(gated(ifNode("Approved or big?", [approvedTrue, bigAmount], "or"), 0), onlyA))).toContain("RG403");
+  });
+
+  it("passes an AND that also checks the answer", () => {
+    expect(report(gated(ifNode("Approved and big?", [approvedTrue, bigAmount]), 0), onlyA).verdict).toBe("clear");
+  });
+
+  it("reads the version 1 IF format", () => {
+    const v1 = { name: "Approved?", type: "n8n-nodes-base.if", typeVersion: 1, parameters: { conditions: { boolean: [{ value1: "={{ $json.data.approved }}", value2: true }] } } };
+    expect(report(gated(v1, 0), onlyA).verdict).toBe("clear");
+    expect(ids(report(gated(v1, 1), onlyA))).toContain("RG403");
+  });
+
+  it("routes a form answer through a Switch by output", () => {
+    const rule = (value: string) => ({ conditions: { conditions: [{ leftValue: "={{ $json.Decision }}", rightValue: value, operator: { type: "string", operation: "equals" } }], combinator: "and" } });
+    const build = (output: number) =>
+      wf()
+        .node({ name: "Daily", type: T.schedule })
+        .node({ name: "Ask", type: T.wait, typeVersion: 1.1, parameters: { resume: "form", formFields: { values: [{ fieldLabel: "Decision", fieldType: "dropdown" }] } } })
+        .node({ name: "Route", type: "n8n-nodes-base.switch", typeVersion: 3.2, parameters: { rules: { values: [rule("Approve"), rule("Reject")] } } })
+        .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+        .chain("Daily", "Ask", "Route")
+        .connect("Route", "Create A", "main", output);
+    expect(report(build(0), onlyA).verdict).toBe("clear");
+    expect(ids(report(build(1), onlyA))).toContain("RG403");
+  });
+});
+
+describe("tokens stay out of the report", () => {
+  const httpWithAuth = (headers: Record<string, unknown>) =>
+    wf().node({
+      name: "Post",
+      type: T.http,
+      typeVersion: 4.2,
+      parameters: { method: "POST", url: "https://quickbooks.api.intuit.com/v3/company/111/bill", ...headers },
+    });
+  const header = (value: string) => ({ sendHeaders: true, headerParameters: { parameters: [{ name: "Authorization", value }] } });
+
+  it("RG105 names where the token comes from without printing the expression", () => {
+    const r = report(httpWithAuth(header("=Bearer {{ $('Get token').item.json.access_token }}")), onlyA);
+    const f = r.findings.find((x) => x.ruleId === "RG105");
+    expect(f?.detail).toContain('"Get token"');
+    expect(f?.detail).not.toMatch(/access_token|\{\{/);
+  });
+
+  it("RG106: a literal token inside an expression is still a pasted token, and never printed", () => {
+    const r = report(httpWithAuth(header('={{ "Bearer sk_live_abcdef123456" + "" }}')), onlyA);
+    expect(ids(r)).toContain("RG106");
+    expect(ids(r)).not.toContain("RG105");
+    expect(JSON.stringify(r)).not.toContain("sk_live");
+    expect(reportToMarkdown(r)).not.toContain("sk_live");
+  });
+});
+
+describe("company IDs and credentials", () => {
+  const http = (name: string, method: string, url: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    type: T.http,
+    typeVersion: 4.2,
+    parameters: { method, url, authentication: "predefinedCredentialType", nodeCredentialType: "quickBooksOAuth2Api", ...extra },
+    credentials: qboCred("c1", "QBO shared"),
+  });
+
+  it("RG301 without a manifest: one credential used with two company IDs doesn't merge them", () => {
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node(http("Read 111", "GET", "https://quickbooks.api.intuit.com/v3/company/111/invoice/9"))
+      .node(http("Post 222", "POST", "https://quickbooks.api.intuit.com/v3/company/222/invoice"))
+      .connect("Daily", "Read 111");
+    approvedPath(b, "Read 111", "Post 222");
+    const r = report(b);
+    expect(ids(r)).toEqual(expect.arrayContaining(["RG104", "RG301"]));
+    expect(r.tenantsTouched).toHaveLength(2);
+  });
+
+  it("RG201: a URL expression that picks between companies isn't a fixed company ID", () => {
+    const url = '={{ $json.client === "a" ? "https://quickbooks.api.intuit.com/v3/company/111/invoice" : "https://quickbooks.api.intuit.com/v3/company/222/invoice" }}';
+    const r = report(wf().node(http("Post", "POST", url)), both);
+    expect(r.touchpoints[0]?.realmId).toBeUndefined();
+    expect(r.touchpoints[0]?.realmIsExpression).toBe(true);
+    expect(ids(r)).toContain("RG201");
+  });
+
+  it("keeps a literal company ID when only a later part of the URL is an expression", () => {
+    const r = report(wf().node(http("Get", "GET", "=https://quickbooks.api.intuit.com/v3/company/111/invoice/{{ $json.id }}")), both);
+    expect(r.touchpoints[0]?.realmId).toBe("111");
+  });
+
+  it("reads only the header mode the node sends", () => {
+    const stale = { sendHeaders: true, headerParameters: { parameters: [{ name: "Accept", value: "application/json" }] }, jsonHeaders: '={"Authorization": "Bearer {{ $json.token }}"}' };
+    const off = { sendHeaders: false, headerParameters: { parameters: [{ name: "Authorization", value: "=Bearer {{ $json.token }}" }] } };
+    const legacy = { jsonParameters: true, headerParametersJson: '{"Accept": "application/json"}', headerParametersUi: { parameter: [{ name: "Authorization", value: "=Bearer {{ $json.token }}" }] } };
+    for (const extra of [stale, off]) {
+      const r = report(wf().node(http("Get", "GET", "https://quickbooks.api.intuit.com/v3/company/111/invoice/1", extra)), both);
+      expect(r.touchpoints[0]?.auth).toBe("credential");
+      expect(ids(r)).not.toContain("RG105");
+    }
+    const old = report(wf().node({ ...http("Get", "GET", "https://quickbooks.api.intuit.com/v3/company/111/invoice/1", legacy), typeVersion: 2 }), both);
+    expect(old.touchpoints[0]?.auth).toBe("credential");
+  });
+
+  it("RG106 still flags a pasted token left in a header the node no longer sends", () => {
+    const off = { sendHeaders: false, headerParameters: { parameters: [{ name: "Authorization", value: "Bearer abcdefghijklmnop" }] } };
+    const r = report(wf().node(http("Get", "GET", "https://quickbooks.api.intuit.com/v3/company/111/invoice/1", off)), both);
+    expect(r.touchpoints[0]?.auth).toBe("credential");
+    expect(r.findings.find((f) => f.ruleId === "RG106")?.detail).toMatch(/isn't sent/);
+  });
+
+  it("resolves a credential's owner the same way whichever reference comes first", () => {
+    const m = manifestYaml([A, { id: "b", credentials: ["QBO B"], realmIds: ["222"] }], ["a"]);
+    const bare = { quickBooksOAuth2Api: { id: "cb" } };
+    const named = { quickBooksOAuth2Api: { id: "cb", name: "QBO B" } };
+    for (const order of [[bare, named], [named, bare]] as const) {
+      const b = wf()
+        .node({ name: "Read", type: T.qbo, parameters: read, credentials: order[0] })
+        .node({ name: "Read again", type: T.qbo, parameters: read, credentials: order[1] });
+      const r = report(b, m);
+      expect(ids(r)).toContain("RG102");
+      expect(ids(r)).not.toContain("RG101");
+    }
+  });
+});
+
+describe("agents and skipped nodes", () => {
+  it("RG301: an agent fed one client's data can write it into another client's books with a tool", () => {
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Read A", type: T.qbo, parameters: read, credentials: credA })
+      .node({ name: "Agent", type: T.agent })
+      .node({ name: "Review", type: T.slackHitl })
+      .node({ name: "Create B", type: T.qboTool, parameters: create, credentials: credB })
+      .chain("Daily", "Read A", "Agent")
+      .connect("Create B", "Review", "ai_tool")
+      .connect("Review", "Agent", "ai_tool");
+    const f = report(b, both).findings.find((x) => x.ruleId === "RG301");
+    expect(f?.nodes).toEqual(["Create B", "Read A"]);
+    expect(f?.detail).toContain('"Agent"');
+  });
+
+  it("lists nodes the parser skipped as gaps, so the verdict can't be clear", () => {
+    const text = JSON.stringify({
+      name: "x",
+      nodes: [
+        { name: "Q", type: T.qbo, parameters: read, credentials: credA },
+        { name: "Q", type: T.qbo, parameters: create, credentials: credB },
+        { type: T.qbo, parameters: create },
+      ],
+      connections: {},
+    });
+    const r = scanText(text, onlyA);
+    if (!r.ok) throw new Error("parse failed");
+    expect(r.report.verdict).toBe("not-verified");
+    const md = reportToMarkdown(r.report);
+    expect(md).toMatch(/Two nodes are named "Q"/);
+    expect(md).toMatch(/Node 3 is missing its name or type/);
+  });
+});
+
+describe("performance with disabled nodes and many approvals", () => {
+  it("scans a long chain of approvals and checks quickly", () => {
+    // 600 approve, check, write rounds in a row: every gate's walk covers the rest of the chain.
+    const b = wf().node({ name: "Hook", type: T.webhook });
+    let prev = "Hook";
+    for (let i = 0; i < 600; i++) {
+      const n = String(i);
+      b.node({ name: `Approve ${n}`, type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+        .node({ name: `Approved ${n}?`, type: "n8n-nodes-base.if", typeVersion: 2.2, parameters: approvedCheck })
+        .node({ name: `Write ${n}`, type: T.qbo, parameters: create, credentials: credA })
+        .chain(prev, `Approve ${n}`, `Approved ${n}?`, `Write ${n}`);
+      prev = `Write ${n}`;
+    }
+    const t0 = performance.now();
+    const r = report(b, onlyA);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(r.verdict).toBe("clear");
+  });
+
+  it("doesn't fan out every pair across a disabled node", () => {
+    const b = wf().node({ name: "Hook", type: T.webhook }).node({ name: "Hub", type: T.set, disabled: true });
+    for (let i = 0; i < 1500; i++) b.node({ name: `In ${String(i)}`, type: T.set }).chain("Hook", `In ${String(i)}`, "Hub");
+    for (let i = 0; i < 1500; i++) b.node({ name: `Out ${String(i)}`, type: T.set }).connect("Hub", `Out ${String(i)}`);
+    b.node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA }).connect("Out 0", "Create A");
+    const t0 = performance.now();
+    const r = report(b, onlyA);
+    expect(performance.now() - t0).toBeLessThan(1000);
+    expect(r.findings.find((f) => f.ruleId === "RG401")?.severity).toBe("high");
+  });
+});

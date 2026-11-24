@@ -22,6 +22,8 @@ export interface Edge {
   to: string;
   /** `main` for data flow; `ai_tool`, `ai_memory` and friends attach sub-nodes to an agent. */
   type: string;
+  /** Which output of `from` the edge leaves by. On an IF, 0 is true and 1 is false. */
+  output: number;
 }
 
 export interface Workflow {
@@ -31,6 +33,8 @@ export interface Workflow {
   pinnedNodes: string[];
   /** Connection ends that named no node in the file (some exports key connections by node id). */
   unresolvedConnections: number;
+  /** Why each node the parser couldn't use was left out. Any of them could be a QuickBooks step. */
+  skippedNodes: string[];
 }
 
 export interface Tenant {

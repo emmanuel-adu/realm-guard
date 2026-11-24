@@ -56,26 +56,26 @@ Without a manifest you still get the agent, approval and state checks. Each cred
 | RG102 | Another client's credential, the classic copied-workflow mistake | Critical |
 | RG103 | A QuickBooks step with no credential in the export | Medium, and it blocks a clean verdict |
 | RG104 | One credential mapped to, or used against, several clients | High |
-| RG105 | An Authorization header built from workflow data | High, or medium when the token and company ID come from the same lookup |
-| RG106 | A token pasted straight into the node | High |
+| RG105 | An Authorization header built from workflow data. The report names the sources, never the expression | High, or medium when the token and company ID come from the same lookup |
+| RG106 | A token pasted into the node, even inside an expression or in a header list it no longer sends | High |
 | **Unpinned client IDs** | | |
 | RG201 | A company ID that comes from data | High, critical when an AI model picks it |
 | RG202 | A company ID that belongs to a client outside the scope | Critical |
 | RG203 | A company ID that isn't in the manifest | High |
 | RG204 | A company ID and a credential that belong to different clients | High |
 | **Cross-client state** | | |
-| RG301 | Data read from one client's books reaching a write into another's | Critical |
+| RG301 | Data read from one client's books reaching a write into another's, including through an agent that writes with a tool | Critical |
 | RG302 | One AI agent holding tools for several clients | High, critical if one writes |
 | RG303 | AI memory with a fixed session key | High in multi-client workflows, medium otherwise |
 | RG304 | Workflow static data in a multi-client workflow | High |
 | **Writes without approval** | | |
 | RG401 | A create, update, delete, send or void with no approval step on the way | High, critical after an AI step, medium for manual-only runs |
 | RG402 | An AI agent write tool with no human review step | Critical |
-| RG403 | An approval step whose answer nothing checks, so Disapprove still posts | High |
+| RG403 | An approval step whose answer nothing checks, or a write on the branch that doesn't mean yes | High |
 | **Export hygiene** | | |
 | RG501 | Pinned data saved in the export | Low |
 
-An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter sits between them and the write. Realm Guard checks that one is there, not what its condition says.
+An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter after them reads the answer and the write hangs off the branch that means yes. Realm Guard reads the condition: `{{ $json.data.approved }}` is true, or a form's Decision equals Approve. A check on anything else, like the amount, doesn't count.
 
 Data flow follows n8n: it passes through disabled nodes, and a write that reads `$('Some node')` gets that node's data even from another branch.
 
@@ -88,6 +88,7 @@ The verdict is **Fix before running** if anything is critical or high, **Not ver
 - Sub-workflows are listed, not opened. Scan each one on its own. Community nodes are listed too, and Code, community and MCP nodes that mention QuickBooks are flagged for a manual check.
 - Vector stores aren't checked for per-client namespaces yet.
 - When a company ID or token comes from an expression, it can only tell you where it comes from, not whether the lookup is right.
+- It reads approval checks that compare the answer with true or false, yes or no, approve or reject, or a form option. A check it can't read counts as no check, so RG403 can fire on a check that's fine.
 
 I checked every node type and default against the published n8n packages (`n8n-nodes-base` 2.48.5 and `@n8n/n8n-nodes-langchain` 2.48.6), and ran the engine over 2,066 public workflow exports without a crash.
 

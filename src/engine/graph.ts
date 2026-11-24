@@ -9,52 +9,64 @@ export interface AgentTool {
   via?: string;
 }
 
+interface Out {
+  to: string;
+  output: number;
+}
+
+/** Which outputs of an enabled node a walk may leave by. Undefined means all of them. */
+export type OutputFilter = (node: string) => ((output: number) => boolean) | undefined;
+
+/**
+ * The workflow as a graph of enabled nodes. n8n passes data straight through a disabled
+ * node, so walks step through disabled nodes without stopping or reporting them. Bridging
+ * them into direct edges instead would add one edge per (parent, child) pair, which a single
+ * disabled node with wide fan-in and fan-out turns into millions.
+ */
 export class Graph {
   readonly byName = new Map<string, WorkflowNode>();
-  private readonly children = new Map<string, string[]>();
-  private readonly parents = new Map<string, string[]>();
+  private readonly disabled = new Set<string>();
+  private readonly outs = new Map<string, Out[]>();
+  private readonly ins = new Map<string, string[]>();
   private readonly toolTargets = new Map<string, string[]>();
   private readonly attached = new Map<string, string[]>();
   private readonly refs = new Map<string, string[]>();
+  /** Disabled nodes with an enabled node somewhere upstream or downstream of them. */
+  private readonly passesFrom = new Set<string>();
+  private readonly passesTo = new Set<string>();
 
   constructor(workflow: Workflow) {
-    const all = new Map(workflow.nodes.map((n) => [n.name, n]));
-    for (const n of workflow.nodes) if (!n.disabled) this.byName.set(n.name, n);
+    for (const n of workflow.nodes) {
+      if (n.disabled) this.disabled.add(n.name);
+      else this.byName.set(n.name, n);
+    }
 
-    const rawChildren = new Map<string, string[]>();
+    // Sets rather than list lookups: a hub node with thousands of edges made those quadratic.
+    const seenOuts = new Set<string>();
+    const seenIns = new Set<string>();
     for (const e of workflow.edges) {
-      if (!all.has(e.from) || !all.has(e.to)) continue;
+      if (!this.known(e.from) || !this.known(e.to)) continue;
       if (e.type === "main") {
-        push(rawChildren, e.from, e.to);
+        const pair = `${e.from}\u0000${e.to}`;
+        const out = `${pair}\u0000${String(e.output)}`;
+        if (!seenOuts.has(out)) {
+          seenOuts.add(out);
+          append(this.outs, e.from, { to: e.to, output: e.output });
+        }
+        if (!seenIns.has(pair)) {
+          seenIns.add(pair);
+          append(this.ins, e.to, e.from);
+        }
       } else if (this.byName.has(e.from) && this.byName.has(e.to)) {
         // Sub-node edges point from the sub-node (tool, memory, model) to what uses it.
         // n8n leaves disabled sub-nodes out entirely, so those edges are dropped.
-        push(this.attached, e.to, e.from);
-        if (e.type === "ai_tool") push(this.toolTargets, e.from, e.to);
+        addUnique(this.attached, e.to, e.from);
+        if (e.type === "ai_tool") addUnique(this.toolTargets, e.from, e.to);
       }
     }
 
-    // n8n passes data straight through a disabled node, so bridge each one: an enabled node
-    // feeds whatever enabled nodes sit beyond any run of disabled ones.
-    const enabledBeyond = (start: string): string[] => {
-      const out = new Set<string>();
-      const seen = new Set<string>();
-      const stack = [...(rawChildren.get(start) ?? [])];
-      while (stack.length > 0) {
-        const n = stack.pop() as string;
-        if (seen.has(n)) continue;
-        seen.add(n);
-        if (this.byName.has(n)) out.add(n);
-        else stack.push(...(rawChildren.get(n) ?? []));
-      }
-      return [...out];
-    };
-    for (const from of this.byName.keys()) {
-      for (const to of enabledBeyond(from)) {
-        push(this.children, from, to);
-        push(this.parents, to, from);
-      }
-    }
+    this.markPassThrough(this.passesFrom, (n) => (this.outs.get(n) ?? []).map((o) => o.to));
+    this.markPassThrough(this.passesTo, (n) => this.ins.get(n) ?? []);
 
     for (const n of this.byName.values()) {
       const names = new Set<string>();
@@ -63,20 +75,57 @@ export class Graph {
     }
   }
 
+  private known(name: string) {
+    return this.byName.has(name) || this.disabled.has(name);
+  }
+
+  /** Marks disabled nodes reachable from an enabled node in the given direction. */
+  private markPassThrough(marked: Set<string>, next: (n: string) => string[]) {
+    const queue: string[] = [];
+    for (const n of this.byName.keys()) for (const m of next(n)) if (this.disabled.has(m)) queue.push(m);
+    while (queue.length > 0) {
+      const n = queue.pop() as string;
+      if (marked.has(n)) continue;
+      marked.add(n);
+      for (const m of next(n)) if (this.disabled.has(m) && !marked.has(m)) queue.push(m);
+    }
+  }
+
   node(name: string) {
     return this.byName.get(name);
   }
 
-  mainParents(name: string) {
-    return this.parents.get(name) ?? [];
+  /** Enabled nodes that feed `name` directly or through disabled nodes. */
+  mainParents(name: string): string[] {
+    return this.through(this.ins.get(name) ?? [], (n) => this.ins.get(n) ?? []);
   }
 
-  mainChildren(name: string) {
-    return this.children.get(name) ?? [];
+  /** Enabled nodes `name` feeds directly or through disabled nodes, optionally from some outputs only. */
+  mainChildren(name: string, outputs?: (output: number) => boolean): string[] {
+    const first = (this.outs.get(name) ?? []).filter((o) => !outputs || outputs(o.output)).map((o) => o.to);
+    return this.through(first, (n) => (this.outs.get(n) ?? []).map((o) => o.to));
+  }
+
+  hasMainParent(name: string) {
+    return (this.ins.get(name) ?? []).some((p) => this.byName.has(p) || this.passesTo.has(p));
   }
 
   hasMainEdges(name: string) {
-    return this.parents.has(name) || this.children.has(name);
+    return this.hasMainParent(name) || (this.outs.get(name) ?? []).some((o) => this.byName.has(o.to) || this.passesFrom.has(o.to));
+  }
+
+  private through(first: string[], next: (n: string) => string[]): string[] {
+    const out = new Set<string>();
+    const seen = new Set<string>();
+    const stack = [...first];
+    while (stack.length > 0) {
+      const n = stack.pop() as string;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      if (this.byName.has(n)) out.add(n);
+      else stack.push(...next(n));
+    }
+    return [...out];
   }
 
   /** Nodes a tool hands its results to: an agent, or a human review step in front of one. */
@@ -119,22 +168,28 @@ export class Graph {
     return out;
   }
 
-  /** Main-edge descendants of `start`, never entering `blocked`. Includes `start`. */
-  reach(start: Iterable<string>, blocked: ReadonlySet<string> = new Set()): Set<string> {
+  /**
+   * Enabled main-edge descendants of `start`, never entering `blocked`. Includes `start`.
+   * `follow` limits which outputs of a node the walk leaves by, so a check can stop one
+   * branch of an IF and not the other.
+   */
+  reach(start: Iterable<string>, blocked: ReadonlySet<string> = new Set(), follow?: OutputFilter): Set<string> {
+    const result = new Set<string>();
     const seen = new Set<string>();
     const queue = [...start].filter((n) => !blocked.has(n));
     while (queue.length > 0) {
       const n = queue.pop() as string;
       if (seen.has(n)) continue;
       seen.add(n);
-      for (const c of this.children.get(n) ?? []) if (!blocked.has(c) && !seen.has(c)) queue.push(c);
+      const enabled = this.byName.has(n);
+      if (enabled) result.add(n);
+      const allowed = enabled ? follow?.(n) : undefined;
+      for (const o of this.outs.get(n) ?? []) {
+        if (allowed && !allowed(o.output)) continue;
+        if (!blocked.has(o.to) && !seen.has(o.to)) queue.push(o.to);
+      }
     }
-    return seen;
-  }
-
-  /** Main-edge ancestors of `node`, excluding the node itself. */
-  ancestors(node: string): Set<string> {
-    return this.walkBack(node, (n) => this.mainParents(n));
+    return result;
   }
 
   /**
@@ -142,23 +197,32 @@ export class Graph {
    * expressions such as $('Read A'), followed transitively.
    */
   dataSources(node: string): Set<string> {
-    return this.walkBack(node, (n) => [...this.mainParents(n), ...(this.refs.get(n) ?? [])]);
+    return this.walkBack(node, (n) => [...(this.ins.get(n) ?? []), ...(this.refs.get(n) ?? [])]);
   }
 
   private walkBack(node: string, next: (n: string) => string[]): Set<string> {
+    const result = new Set<string>();
     const seen = new Set<string>();
     const queue = [...next(node)];
     while (queue.length > 0) {
       const n = queue.pop() as string;
       if (seen.has(n) || n === node) continue;
       seen.add(n);
+      if (this.byName.has(n)) result.add(n);
       queue.push(...next(n));
     }
-    return seen;
+    return result;
   }
 }
 
-function push(map: Map<string, string[]>, key: string, value: string) {
+
+function append<T>(map: Map<string, T[]>, key: string, value: T) {
+  const list = map.get(key);
+  if (!list) map.set(key, [value]);
+  else list.push(value);
+}
+
+function addUnique(map: Map<string, string[]>, key: string, value: string) {
   const list = map.get(key);
   if (!list) map.set(key, [value]);
   else if (!list.includes(value)) list.push(value);

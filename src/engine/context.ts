@@ -13,16 +13,27 @@ export const credentialKey = (ref: CredentialRef) => (ref.id ? `id:${ref.id}` : 
 
 /**
  * Maps credentials and realm IDs to clients. Without a manifest each credential or company ID
- * stands in for a client, and a company ID used with a credential joins that credential's
- * client, so flows between companies still show up without inventing ones that aren't there.
+ * stands in for a client, and a credential used with exactly one company ID joins that
+ * company's client, so flows between companies still show up without inventing ones that
+ * aren't there. A credential seen with two company IDs never merges them: the company ID is
+ * the client, and Intuit tokens are issued per company.
  */
 export class Tenancy {
   readonly names = new Map<string, string>();
   private readonly order: string[] = [];
   private readonly parent = new Map<string, string>();
+  /** Every name a credential id goes by in this export. Some references drop the name. */
+  private readonly aliases = new Map<string, Set<string>>();
 
   constructor(readonly manifest: Manifest | undefined) {
     for (const t of manifest?.tenants ?? []) this.add(t.id, t.name);
+  }
+
+  alias(ref: CredentialRef) {
+    if (!ref.id || !ref.name) return;
+    const set = this.aliases.get(ref.id) ?? new Set<string>();
+    set.add(ref.name.trim().toLowerCase());
+    this.aliases.set(ref.id, set);
   }
 
   private add(id: string, name: string) {
@@ -61,9 +72,10 @@ export class Tenancy {
   credential(ref: CredentialRef | undefined): string[] {
     if (!ref) return [];
     if (!this.manifest) return [this.root(this.pseudoCredential(ref))];
-    const name = ref.name?.trim().toLowerCase();
+    const names = new Set(ref.id ? this.aliases.get(ref.id) : undefined);
+    if (ref.name) names.add(ref.name.trim().toLowerCase());
     return this.manifest.tenants
-      .filter((t) => t.credentials.some((c) => (ref.id !== undefined && c === ref.id) || (name !== undefined && c.trim().toLowerCase() === name)))
+      .filter((t) => t.credentials.some((c) => (ref.id !== undefined && c === ref.id) || names.has(c.trim().toLowerCase())))
       .map((t) => t.id);
   }
 
@@ -105,11 +117,42 @@ export function buildContext(workflow: Workflow, manifest: Manifest | undefined)
   const graph = new Graph(workflow);
   const tenancy = new Tenancy(manifest);
   const raw = findTouchpoints(workflow);
+  const credOf = (tp: RawTouchpoint) => (tp.auth.kind === "credential" ? tp.auth.credential : undefined);
+
+  // Resolve each credential id's name once, so a reference without the name gets the same
+  // owner and label as one with it, whichever comes first in the file.
+  const nameById = new Map<string, string>();
   for (const tp of raw) {
-    if (tp.auth.kind === "credential" && tp.auth.credential && tp.realm.kind === "literal") tenancy.link(tp.auth.credential, tp.realm.id);
+    const c = credOf(tp);
+    if (!c) continue;
+    tenancy.alias(c);
+    if (c.id && c.name && !nameById.has(c.id)) nameById.set(c.id, c.name);
   }
+  for (const tp of raw) {
+    const c = credOf(tp);
+    const name = c?.id ? nameById.get(c.id) : undefined;
+    if (tp.auth.kind === "credential" && c && !c.name && name) tp.auth = { ...tp.auth, credential: { ...c, name } };
+  }
+
+  const realmsByCredential = new Map<string, { ref: CredentialRef; realms: Set<string> }>();
+  for (const tp of raw) {
+    const c = credOf(tp);
+    if (!c || tp.realm.kind !== "literal") continue;
+    const entry = realmsByCredential.get(credentialKey(c)) ?? { ref: c, realms: new Set<string>() };
+    entry.realms.add(tp.realm.id);
+    realmsByCredential.set(credentialKey(c), entry);
+  }
+  for (const { ref, realms } of realmsByCredential.values()) {
+    const [only] = realms;
+    if (realms.size === 1 && only !== undefined) tenancy.link(ref, only);
+  }
+  // Without a manifest, a credential used with several company IDs says nothing about which
+  // one a call reaches; the company ID in that call's URL does.
+  const ambiguous = (c: CredentialRef | undefined) => !manifest && c !== undefined && (realmsByCredential.get(credentialKey(c))?.realms.size ?? 0) > 1;
+
   const touchpoints: Resolved[] = raw.map((tp) => {
-    const credTenants = tp.auth.kind === "credential" ? tenancy.credential(tp.auth.credential) : [];
+    const c = credOf(tp);
+    const credTenants = tp.auth.kind === "credential" && !(ambiguous(c) && tp.realm.kind === "literal") ? tenancy.credential(c) : [];
     const realmTenants = tp.realm.kind === "literal" ? tenancy.realm(tp.realm.id) : [];
     return { ...tp, credTenants, realmTenants, tenants: tenancy.sort([...credTenants, ...realmTenants]) };
   });

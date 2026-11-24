@@ -141,11 +141,11 @@ describe("credentials", () => {
 
   it("RG105: reports the touchpoint's auth as a runtime token, not a missing credential", () => {
     const r = run(
-      wf().node({ name: "Post bill", type: T.http, parameters: { method: "POST", url: qboUrl("9130354772541234", "bill"), headerParameters: { parameters: [{ name: "Authorization", value: "=Bearer {{ $json.access_token }}" }] } } }),
+      wf().node({ name: "Post bill", type: T.http, typeVersion: 4.2, parameters: { method: "POST", url: qboUrl("9130354772541234", "bill"), sendHeaders: true, headerParameters: { parameters: [{ name: "Authorization", value: "=Bearer {{ $json.access_token }}" }] } } }),
       harborOnly,
     );
     expect(r.touchpoints[0]?.auth).toBe("dynamic-token");
-    expect(find(r, "RG105").detail).toContain("`Bearer {{ $json.access_token }}`");
+    expect(find(r, "RG105").detail).toBe("The Authorization header is built at run time from the incoming item.");
   });
 
   it("RG105: lowers to medium when token and realm come from the same lookup node", () => {
@@ -158,6 +158,7 @@ describe("credentials", () => {
           parameters: {
             method: "POST",
             url: "=https://quickbooks.api.intuit.com/v3/company/{{ $('Tenant lookup').item.json.realmId }}/bill",
+            sendHeaders: true,
             headerParameters: { parameters: [{ name: "Authorization", value: "=Bearer {{ $('Tenant lookup').item.json.token }}" }] },
           },
         })
@@ -169,7 +170,7 @@ describe("credentials", () => {
 
   it("RG106: flags a token pasted into the node", () => {
     const r = run(
-      wf().node({ name: "Q", type: T.http, parameters: { url: qboUrl("9130354772541234", "query"), headerParameters: { parameters: [{ name: "Authorization", value: "Bearer eyJhbGciOiJSUzI1NiJ9.abc" }] } } }),
+      wf().node({ name: "Q", type: T.http, parameters: { url: qboUrl("9130354772541234", "query"), sendHeaders: true, headerParameters: { parameters: [{ name: "Authorization", value: "Bearer eyJhbGciOiJSUzI1NiJ9.abc" }] } } }),
       harborOnly,
     );
     expect(find(r, "RG106").severity).toBe("high");
@@ -366,7 +367,12 @@ describe("approvals", () => {
       wf()
         .node({ name: "Nightly", type: T.schedule })
         .node({ name: "Ask", type: T.slack, parameters: { operation: "sendAndWait" } })
-        .node({ name: "Approved?", type: "n8n-nodes-base.if" })
+        .node({
+          name: "Approved?",
+          type: "n8n-nodes-base.if",
+          typeVersion: 2.2,
+          parameters: { conditions: { conditions: [{ leftValue: "={{ $json.data.approved }}", operator: { type: "boolean", operation: "true" } }] } },
+        })
         .node({ name: "Make", type: T.qbo, parameters: create, credentials: harborCred })
         .chain("Nightly", "Ask", "Approved?", "Make"),
       harborOnly,

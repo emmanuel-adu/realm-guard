@@ -20,7 +20,7 @@ export function scan(workflow: Workflow, manifest?: Manifest): Report {
 
   const active = workflow.nodes.filter((n) => !n.disabled);
   const subWorkflows = active.filter((n) => isSubWorkflowCall(n.type)).map((n) => n.name);
-  const gaps: string[] = [];
+  const gaps: string[] = [...workflow.skippedNodes];
   if (!manifest && ctx.touchpoints.length > 0) {
     gaps.push("No client manifest, so credentials and company IDs weren't checked against your client list.");
   }

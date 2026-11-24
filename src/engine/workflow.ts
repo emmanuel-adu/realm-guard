@@ -54,14 +54,14 @@ function normalizeEdges(raw: unknown, known: Set<string>): { edges: Edge[]; unre
     if (!isObj(byType)) continue;
     for (const [type, outputs] of Object.entries(byType)) {
       if (!Array.isArray(outputs)) continue;
-      for (const output of outputs) {
-        if (!Array.isArray(output)) continue;
-        for (const target of output) {
+      outputs.forEach((targets, output) => {
+        if (!Array.isArray(targets)) return;
+        for (const target of targets) {
           if (!isObj(target) || typeof target.node !== "string") continue;
-          if (known.has(from) && known.has(target.node)) edges.push({ from, to: target.node, type });
+          if (known.has(from) && known.has(target.node)) edges.push({ from, to: target.node, type, output });
           else unresolved++;
         }
-      }
+      });
     }
   }
   return { edges, unresolved };
@@ -92,12 +92,12 @@ export function parseWorkflow(text: string): ParseResult<Workflow> {
   }
 
   const nodes: WorkflowNode[] = [];
-  const warnings: string[] = [];
+  const skipped: string[] = [];
   const seen = new Set<string>();
   data.nodes.forEach((raw, i) => {
     const n = normalizeNode(raw, i);
-    if (typeof n === "string") warnings.push(`${n} It was skipped.`);
-    else if (seen.has(n.name)) warnings.push(`Two nodes are named "${n.name}". Only the first was scanned.`);
+    if (typeof n === "string") skipped.push(`${n} It wasn't scanned.`);
+    else if (seen.has(n.name)) skipped.push(`Two nodes are named "${n.name}". Only the first was scanned.`);
     else {
       seen.add(n.name);
       nodes.push(n);
@@ -109,6 +109,7 @@ export function parseWorkflow(text: string): ParseResult<Workflow> {
     .filter(([, items]) => (Array.isArray(items) ? items.length > 0 : items != null))
     .map(([node]) => node);
 
+  const warnings = [...skipped];
   const { edges, unresolved } = normalizeEdges(data.connections, seen);
   if (unresolved > 0) warnings.push(`${String(unresolved)} ${unresolved === 1 ? "connection points" : "connections point"} to nodes that aren't in this file, so the order of some steps couldn't be read.`);
 
@@ -121,6 +122,7 @@ export function parseWorkflow(text: string): ParseResult<Workflow> {
       edges,
       pinnedNodes: pinned,
       unresolvedConnections: unresolved,
+      skippedNodes: skipped,
     },
   };
 }

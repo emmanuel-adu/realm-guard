@@ -32,6 +32,8 @@ export interface RawTouchpoint {
   write: boolean;
   realm: RealmSource;
   auth: AuthSource;
+  /** A literal bearer token in a header the node doesn't send. It still ships with the file. */
+  unusedPastedToken?: boolean;
 }
 
 const str = (v: unknown) => (typeof v === "string" ? v : undefined);
@@ -57,12 +59,19 @@ function qboNodeTouchpoint(node: WorkflowNode): RawTouchpoint {
  * Splits a QBO API URL into the realm segment and the path after it. `assumeQbo` is set when
  * the node's credential already marks it as a QuickBooks call, so the host can be hidden.
  */
-export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSource; path: string } | undefined {
+export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSource; path: string; pathIsExpression?: true } | undefined {
   const url = raw.startsWith("=") ? raw.slice(1) : raw;
   if (!assumeQbo && !/intuit|quickbooks|\bqbo/i.test(url)) return undefined;
   const marker = "/v3/company/";
   const at = url.indexOf(marker);
   if (at < 0) return undefined;
+  // A company ID written inside {{ }} is code, not the URL: `{{ a ? ".../111/..." : ".../222/..." }}`
+  // picks the company at run time even though each branch spells out a number.
+  if (raw.startsWith("=") && insideExpression(url, at)) {
+    const paths = [...url.matchAll(/\/v3\/company\/[^/?#"'`]*\/?([a-z0-9]*)/gi)].map((m) => (m[1] ?? "").toLowerCase());
+    if (new Set(paths).size === 1) return { realm: { kind: "expression", expr: url }, path: paths[0] ?? "" };
+    return { realm: { kind: "expression", expr: url }, path: "", pathIsExpression: true };
+  }
   const rest = url.slice(at + marker.length);
   let segment: string;
   if (rest.startsWith("{{")) {
@@ -82,41 +91,68 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
   return { realm, path };
 }
 
+function insideExpression(url: string, at: number): boolean {
+  for (const m of url.matchAll(/\{\{[\s\S]*?(\}\}|$)/g)) if (at >= m.index && at < m.index + m[0].length) return true;
+  return false;
+}
+
 interface Header {
   name: string;
   value: string;
 }
 
-function headersOf(p: Record<string, unknown>): Header[] {
-  const out: Header[] = [];
-  const lists = [
-    (p.headerParameters as { parameters?: unknown } | undefined)?.parameters,
-    (p.headerParametersUi as { parameter?: unknown } | undefined)?.parameter,
-    (p.parametersHeaders as { values?: unknown } | undefined)?.values,
-  ];
-  for (const list of lists) {
-    if (!Array.isArray(list)) continue;
-    for (const h of list as Record<string, unknown>[]) {
-      const name = str(h.name);
-      const value = str(h.value);
-      if (name && value !== undefined) out.push({ name, value });
-    }
+type HeaderSource = "keypair" | "legacy-list" | "tool-list" | "json" | "legacy-json";
+
+function headerList(p: Record<string, unknown>, source: HeaderSource): Header[] {
+  if (source === "json" || source === "legacy-json") {
+    const raw = str(p[source === "json" ? "jsonHeaders" : "headerParametersJson"]);
+    const m = raw ? /"authorization"\s*:\s*"([^"]*)"/i.exec(raw) : null;
+    if (!raw || m?.[1] === undefined) return [];
+    return [{ name: "Authorization", value: raw.startsWith("=") ? `=${m[1]}` : m[1] }];
   }
-  for (const key of ["jsonHeaders", "headerParametersJson"]) {
-    const raw = str(p[key]);
-    if (!raw) continue;
-    const m = /"authorization"\s*:\s*"([^"]*)"/i.exec(raw);
-    if (m?.[1] !== undefined) out.push({ name: "Authorization", value: raw.startsWith("=") ? `=${m[1]}` : m[1] });
+  const list =
+    source === "keypair"
+      ? (p.headerParameters as { parameters?: unknown } | undefined)?.parameters
+      : source === "legacy-list"
+        ? (p.headerParametersUi as { parameter?: unknown } | undefined)?.parameter
+        : (p.parametersHeaders as { values?: unknown } | undefined)?.values;
+  if (!Array.isArray(list)) return [];
+  const out: Header[] = [];
+  for (const h of list as Record<string, unknown>[]) {
+    const name = str(h.name);
+    const value = str(h.value);
+    if (name && value !== undefined) out.push({ name, value });
   }
   return out;
 }
 
+const ALL_SOURCES: HeaderSource[] = ["keypair", "legacy-list", "tool-list", "json", "legacy-json"];
+
+/**
+ * The header list the node actually sends. A node switched from one mode to another can keep
+ * the old list in its parameters, and reading that one hides the auth the node really uses.
+ */
+function activeHeaderSources(node: WorkflowNode): HeaderSource[] {
+  const p = node.parameters;
+  // HTTP Request v1 and v2 had no on/off switch: a toggle picked the list or the JSON field.
+  if (node.type === "n8n-nodes-base.httpRequest" && node.typeVersion < 3 && !("sendHeaders" in p)) return [p.jsonParameters === true ? "legacy-json" : "legacy-list"];
+  if (p.sendHeaders !== true) return [];
+  if (p.specifyHeaders === "json") return ["json"];
+  return ["keypair", "tool-list"];
+}
+
+// A bearer token typed in, even inside an expression (`{{ "Bearer sk_live_..." }}`). Stops at
+// `{`, `$`, quotes and `+`, so `Bearer {{ $json.token }}` and `"Bearer " + token` don't count.
+const LITERAL_BEARER = /bearer\s+[\w.~/=-]{10,}/i;
+
+const authHeader = (headers: Header[]) => headers.find((h) => h.name.toLowerCase() === "authorization");
+
 function httpAuth(node: WorkflowNode): AuthSource {
   const p = node.parameters;
-  const auth = headersOf(p).find((h) => h.name.toLowerCase() === "authorization");
+  const auth = authHeader(activeHeaderSources(node).flatMap((src) => headerList(p, src)));
   if (auth) {
+    if (LITERAL_BEARER.test(auth.value)) return { kind: "pasted-token" };
     if (isExpression(auth.value)) return { kind: "dynamic-token", expr: auth.value };
-    if (/bearer\s+\S{10,}/i.test(auth.value)) return { kind: "pasted-token" };
   }
   let credentialType: string | undefined;
   if (p.authentication === "predefinedCredentialType") credentialType = str(p.nodeCredentialType);
@@ -141,14 +177,17 @@ function httpTouchpoint(node: WorkflowNode): RawTouchpoint | undefined {
   const method = str(node.parameters.method) ?? str(node.parameters.requestMethod) ?? "GET";
   const dynamicMethod = isExpression(method);
   const write = dynamicMethod || (method.toUpperCase() !== "GET" && !READ_PATHS.has(parsed.path));
-  return {
+  const auth = httpAuth(node);
+  const tp: RawTouchpoint = {
     node,
     kind: HTTP_TOOLS.has(node.type) ? "http-tool" : "http",
-    operation: `${dynamicMethod ? "(method set by expression)" : method.toUpperCase()} ${parsed.path || "(company)"}`,
+    operation: `${dynamicMethod ? "(method set by expression)" : method.toUpperCase()} ${parsed.path || ("pathIsExpression" in parsed ? "(path set by expression)" : "(company)")}`,
     write,
     realm: parsed.realm,
-    auth: httpAuth(node),
+    auth,
   };
+  if (auth.kind !== "pasted-token" && ALL_SOURCES.some((src) => LITERAL_BEARER.test(authHeader(headerList(node.parameters, src))?.value ?? ""))) tp.unusedPastedToken = true;
+  return tp;
 }
 
 export function findTouchpoints(workflow: Workflow): RawTouchpoint[] {
