@@ -1,5 +1,5 @@
 import { ClipboardPaste, FileJson, Upload, X } from "lucide-react";
-import { type ReactNode, useEffect, useId, useRef, useState } from "react";
+import { type ReactNode, useId, useLayoutEffect, useRef, useState } from "react";
 import { MAX_INPUT_BYTES } from "../engine/workflow";
 import { Button } from "./ui";
 
@@ -39,8 +39,9 @@ export function SourceCard({ id, label, optional, hint, drop, accept, placeholde
 
   // Reading a file is async, and the user (or a sample button) can change the source before it
   // finishes. Each read takes a ticket; any newer read or any change to the source voids it.
+  // A layout effect, so the bump lands during commit, before a later pick can take a ticket.
   const readTicket = useRef(0);
-  useEffect(() => {
+  useLayoutEffect(() => {
     readTicket.current++;
   }, [value]);
 
