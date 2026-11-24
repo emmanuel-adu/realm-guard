@@ -153,10 +153,25 @@ function headerList(node: WorkflowNode, source: HeaderSource): Header[] {
   const tool = node.type === TOOL_HTTP;
   if (source === "json" || source === "legacy-json") {
     const raw = str(p[source === "json" ? "jsonHeaders" : "headerParametersJson"]);
-    const m = raw ? /"authorization"\s*:\s*"([^"]*)"/i.exec(raw) : null;
-    if (!raw || m?.[1] === undefined) return [];
-    const value = raw.startsWith("=") ? `=${m[1]}` : m[1];
-    return [tool && PLACEHOLDER.test(m[1]) ? { name: "Authorization", value, fromModel: true } : { name: "Authorization", value }];
+    if (!raw) return [];
+    // Static JSON is parsed, so escapes like "Authoriz\u0061tion" decode the way n8n's will.
+    // JSON with {{ }} can't be parsed before run time, so a pattern reads it instead.
+    let found: string | undefined;
+    if (!raw.includes("{{")) {
+      try {
+        const parsed: unknown = JSON.parse(raw.replace(/^=/, ""));
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          const entry = Object.entries(parsed).find(([k, v]) => k.toLowerCase() === "authorization" && typeof v === "string");
+          found = entry?.[1] as string | undefined;
+        }
+      } catch {
+        // Not valid JSON on its own; fall through to the pattern.
+      }
+    }
+    found ??= /"authorization"\s*:\s*"([^"]*)"/i.exec(raw)?.[1];
+    if (found === undefined) return [];
+    const value = raw.startsWith("=") ? `=${found}` : found;
+    return [tool && PLACEHOLDER.test(found) ? { name: "Authorization", value, fromModel: true } : { name: "Authorization", value }];
   }
   const list =
     source === "keypair"
@@ -166,13 +181,16 @@ function headerList(node: WorkflowNode, source: HeaderSource): Header[] {
         : (p.parametersHeaders as { values?: unknown } | undefined)?.values;
   if (!Array.isArray(list)) return [];
   const out: Header[] = [];
-  for (const h of list as Record<string, unknown>[]) {
-    const name = str(h.name);
-    const value = str(h.value);
+  for (const h of list as unknown[]) {
+    // Exports can carry null or junk entries; one bad entry mustn't stop the whole scan.
+    if (typeof h !== "object" || h === null) continue;
+    const entry = h as Record<string, unknown>;
+    const name = str(entry.name);
+    const value = str(entry.value);
     if (!name) continue;
     if (source === "tool-list") {
       // n8n 2.48 defaults the provider to modelRequired, and only reads `value` for fieldValue.
-      const provider = str(h.valueProvider) ?? "modelRequired";
+      const provider = str(entry.valueProvider) ?? "modelRequired";
       const fromModel = provider.includes("model") || PLACEHOLDER.test(value ?? "");
       out.push(fromModel ? { name, value: value ?? "", fromModel } : { name, value: value ?? "" });
     } else if (value !== undefined) out.push({ name, value });

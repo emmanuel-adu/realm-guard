@@ -1,5 +1,5 @@
 import { ClipboardPaste, FileJson, Upload, X } from "lucide-react";
-import { type ReactNode, useId, useRef, useState } from "react";
+import { type ReactNode, useEffect, useId, useRef, useState } from "react";
 import { MAX_INPUT_BYTES } from "../engine/workflow";
 import { Button } from "./ui";
 
@@ -37,19 +37,28 @@ export function SourceCard({ id, label, optional, hint, drop, accept, placeholde
   const hintId = useId();
   const errorId = useId();
 
+  // Reading a file is async, and the user (or a sample button) can change the source before it
+  // finishes. Each read takes a ticket; any newer read or any change to the source voids it.
+  const readTicket = useRef(0);
+  useEffect(() => {
+    readTicket.current++;
+  }, [value]);
+
   async function readFile(file: File | undefined) {
     if (!file) return;
+    const ticket = ++readTicket.current;
     if (file.size > MAX_INPUT_BYTES) {
       setReadError(`${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB. Realm Guard reads files up to 5 MB.`);
       return;
     }
     try {
       const text = await file.text();
+      if (ticket !== readTicket.current) return;
       setReadError(null);
       setPasting(false);
       onChange({ text, label: file.name, origin: "file" });
     } catch {
-      setReadError(`Couldn't read ${file.name}. Try exporting it again.`);
+      if (ticket === readTicket.current) setReadError(`Couldn't read ${file.name}. Try exporting it again.`);
     }
   }
 
@@ -150,6 +159,7 @@ export function SourceCard({ id, label, optional, hint, drop, accept, placeholde
           aria-invalid={allErrors.length > 0}
           onChange={(e) => {
             const text = e.target.value;
+            setReadError(null);
             if (!text && !editable) {
               onChange(null);
               return;

@@ -96,7 +96,10 @@ function valuePolarity(v: unknown): 1 | -1 | 0 {
 // Anything more (`!x`, `x == false`, a ternary, a function call) can flip the meaning, so a
 // condition built on it reads the answer but isn't signed.
 const PLAIN_READ =
-  /^=\s*\{\{\s*\$(?:json|input\.(?:item|first\(\)|last\(\))\.json|\(\s*(['"`])[^'"`]+\1\s*\)\.(?:item|first\(\)|last\(\))\.json|node\[\s*(['"`])[^'"`]+\2\s*\]\.json)(?:\.[A-Za-z_$][\w$]*|\[\s*(['"`])[^'"`]*\3\s*\]|\[\d+\])*\s*\}\}\s*$/;
+  /^=\s*\{\{\s*\$(?:json|input\.(?:item|first\(\)|last\(\))\.json|\(\s*(['"`])(?:\\.|(?!\1)[^\\])+\1\s*\)\.(?:item|first\(\)|last\(\))\.json|node\[\s*(['"`])(?:\\.|(?!\2)[^\\])+\2\s*\]\.json)(?:\.[A-Za-z_$][\w$]*|\[\s*(['"`])[^'"`]*\3\s*\]|\[\d+\])*\s*\}\}\s*$/;
+
+// A fixed string written as an expression: ={{ 'Send it' }}.
+const CONSTANT_STRING = /^=\s*\{\{\s*(['"`])[^'"`$]*\1\s*\}\}$/;
 
 /** Undefined when the condition doesn't look at the answer at all. */
 function polarity(c: Condition, reads: (s: string) => boolean): Polarity | undefined {
@@ -111,7 +114,7 @@ function polarity(c: Condition, reads: (s: string) => boolean): Polarity | undef
   let vp = c.op === "true" || c.op === "false" ? 1 : valuePolarity(value);
   // "Decision equals Send it" reads as choosing that option; a negated unknown value doesn't,
   // and neither does another run-time value, which can be false on a declined run.
-  if (vp === 0) vp = sign === 1 && typeof value === "string" && value.trim() !== "" && !isExpression(value) ? 1 : 0;
+  if (vp === 0) vp = sign === 1 && typeof value === "string" && value.trim() !== "" && (!isExpression(value) || CONSTANT_STRING.test(value.trim())) ? 1 : 0;
   if (vp === 0) return "unknown";
   return sign * vp > 0 ? "approved" : "declined";
 }

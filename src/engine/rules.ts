@@ -1,6 +1,6 @@
 import { type Context, type Resolved, credentialKey } from "./context";
 import { answerKeys, approvedOutputs } from "./decisions";
-import { isExpression, referencedNodes, usesFromAI, usesIncomingItem } from "./expressions";
+import { isExpression, itemSelections, referencedNodes, usesFromAI, usesIncomingItem } from "./expressions";
 import { approvalKind, codeOf, isAgent, isAiNode, isCodeNode, isDecision, isHitlReview, isSticky, memoryKind, triggerKind } from "./nodes";
 import { credentialLabel } from "./quickbooks";
 import type { Approval, Finding } from "./types";
@@ -19,7 +19,9 @@ function groupBy<T>(items: T[], key: (t: T) => string | undefined): Map<string, 
   for (const item of items) {
     const k = key(item);
     if (k === undefined) continue;
-    out.set(k, [...(out.get(k) ?? []), item]);
+    const bucket = out.get(k);
+    if (bucket) bucket.push(item);
+    else out.set(k, [item]);
   }
   return out;
 }
@@ -126,9 +128,15 @@ export function credentialRules(ctx: Context): Finding[] {
   const isNode = nodeNames(ctx);
   for (const tp of ctx.touchpoints) {
     if (tp.auth.kind === "dynamic-token") {
-      const tokenRefs = referencedNodes(tp.auth.expr).filter(isNode);
-      const realmRefs = tp.realm.kind === "expression" ? referencedNodes(tp.realm.expr) : [];
-      const pairedBy = tokenRefs.find((r) => realmRefs.includes(r));
+      // Paired only when both read the same item of the same node: first() for the token and
+      // last() for the company can be two different clients.
+      const tokenPicks = itemSelections(tp.auth.expr);
+      const realmPicks = tp.realm.kind === "expression" ? itemSelections(tp.realm.expr) : new Map<string, Set<string>>();
+      const pairedBy = [...tokenPicks].find(([node, picks]) => {
+        const other = realmPicks.get(node);
+        const [pick] = picks;
+        return isNode(node) && picks.size === 1 && pick !== "?" && other?.size === 1 && other.has(pick ?? "");
+      })?.[0];
       out.push({
         ruleId: "RG105",
         category: "credentials",
@@ -476,7 +484,8 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
     if (tp.kind === "quickbooks-tool" || tp.kind === "http-tool") {
       const consumers = graph.toolConsumers(name);
       const direct = consumers.filter((c) => !isHitlReview(graph.node(c)?.type ?? ""));
-      approvals.set(name, direct.length === 0 ? "gated" : "ungated");
+      // A tool no agent can call never runs; calling that "waits for a person" would be wrong.
+      approvals.set(name, consumers.length === 0 ? "unattached" : direct.length === 0 ? "gated" : "ungated");
       for (const agent of direct) {
         findings.push({
           ruleId: "RG402",

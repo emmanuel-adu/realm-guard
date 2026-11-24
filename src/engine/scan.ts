@@ -40,7 +40,7 @@ export function scan(workflow: Workflow, manifest?: Manifest): Report {
   // Nodes that may reach QuickBooks in ways the export doesn't show.
   const communityNodes = active.filter((n) => isCommunityNode(n.type) && !isSticky(n.type)).map((n) => n.name);
   const mentions = (n: (typeof active)[number]) =>
-    MENTIONS_QUICKBOOKS.test(n.name) || MENTIONS_QUICKBOOKS.test(n.type) || [...stringLeaves(n.parameters)].some(([, v]) => MENTIONS_QUICKBOOKS.test(v));
+    MENTIONS_QUICKBOOKS.test(n.name) || MENTIONS_QUICKBOOKS.test(n.type) || [...stringLeaves(n.parameters)].some((v) => MENTIONS_QUICKBOOKS.test(v));
   for (const n of active) {
     if (ctx.byNode.has(n.name)) continue;
     if (isCodeNode(n.type) && MENTIONS_QUICKBOOKS.test(codeOf(n))) gaps.push(`${n.name} is a Code node that mentions QuickBooks. Code isn't analyzed, so check it by hand.`);

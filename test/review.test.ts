@@ -2,7 +2,8 @@
 // a wrong verdict or a crash on the first build.
 import { describe, expect, it } from "vitest";
 import { scanText } from "../src/engine";
-import { parseManifest } from "../src/engine/manifest";
+import { draftManifest, parseManifest } from "../src/engine/manifest";
+import { parseWorkflow } from "../src/engine/workflow";
 import { reportToMarkdown } from "../src/engine/markdown";
 import type { Report } from "../src/engine/types";
 import { T, type WorkflowBuilder, manifestYaml, qboCred, wf } from "./helpers";
@@ -174,7 +175,10 @@ describe("manifest safety", () => {
 
   it("refuses an alias bomb", () => {
     const bomb = ["a: &a [x, x, x, x, x, x, x, x, x, x]", ...Array.from({ length: 9 }, (_, i) => `${String.fromCharCode(98 + i)}: &${String.fromCharCode(98 + i)} [*${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}, *${String.fromCharCode(97 + i)}]`), "tenants:\n  - id: a"].join("\n");
-    expect(parseManifest(bomb).ok).toBe(false);
+    const r = parseManifest(bomb);
+    expect(r.ok).toBe(false);
+    // The alias limit must be what rejects it, not the unknown top-level keys around it.
+    if (!r.ok) expect(r.errors.join(" ")).toMatch(/alias/i);
   });
 });
 
@@ -737,5 +741,103 @@ describe("round four", () => {
     expect(report(b, onlyA).touchpoints[0]?.write).toBe(true);
     const fixed = wf().node({ name: "Call", type: T.http, typeVersion: 4.2, parameters: { method: "POST", url: "={{ `https://quickbooks.api.intuit.com/v3/company/${$json.realm}/query` }}" }, credentials: credA });
     expect(report(fixed, onlyA).touchpoints[0]?.write).toBe(false);
+  });
+});
+
+// The first review's 19 minor comments, which sat in the review body rather than in threads.
+describe("first review, minor comments", () => {
+  it("survives deeply nested parameters", () => {
+    // Built as text: JSON.stringify itself runs out of stack on a tree this deep.
+    const deep = `${"[".repeat(20000)}"x"${"]".repeat(20000)}`;
+    const text = `{"name":"x","nodes":[{"name":"Deep","type":"${T.set}","parameters":{"v":${deep}}},{"name":"Q","type":"${T.qbo}","credentials":${JSON.stringify(credA)}}],"connections":{}}`;
+    const r = scanText(text, onlyA);
+    expect(r.ok).toBe(true);
+  });
+
+  it("reads $('...') names with escaped quotes", () => {
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Client's data", type: T.qbo, parameters: read, credentials: credA })
+      .node({ name: "Create B", type: T.qbo, parameters: { ...create, CustomerRef: "={{ $('Client\\'s data').first().json.Id }}" }, credentials: credB })
+      .connect("Daily", "Client's data");
+    approvedPath(b, "Daily", "Create B");
+    expect(ids(report(b, both))).toContain("RG301");
+  });
+
+  it("drafts a manifest that parses back for any credential name, and matches id-only credentials", () => {
+    const b = wf()
+      .node({ name: "A", type: T.qbo, credentials: qboCred("c1", "true") })
+      .node({ name: "B", type: T.qbo, credentials: { quickBooksOAuth2Api: { id: "11" } } });
+    const w = parseWorkflow(b.text());
+    if (!w.ok) throw new Error("parse failed");
+    const draft = draftManifest(w.value);
+    const m = parseManifest(draft);
+    expect(m.ok).toBe(true);
+    const r = scanText(b.text(), draft);
+    expect(r.ok && r.report.findings.map((f) => f.ruleId)).not.toContain("RG101");
+  });
+
+  it("RG303: shared in-workflow memory counts when the steps touch two clients, whatever the scope says", () => {
+    const b = wf()
+      .node({ name: "Read A", type: T.qbo, parameters: read, credentials: credA })
+      .node({ name: "Read B", type: T.qbo, parameters: read, credentials: credB })
+      .node({ name: "Memory", type: T.bufferMemory, typeVersion: 1.3, parameters: { sessionIdType: "customKey", sessionKey: "ap" } });
+    expect(ids(report(b, onlyA))).toContain("RG303");
+  });
+
+  it("skips a malformed header entry instead of crashing the scan", () => {
+    const b = wf().node({
+      name: "Post",
+      type: T.http,
+      typeVersion: 4.2,
+      parameters: { method: "POST", url: "https://quickbooks.api.intuit.com/v3/company/111/bill", sendHeaders: true, headerParameters: { parameters: [null, { name: "Authorization", value: "Bearer abcdefghijklmnop" }] } },
+    });
+    expect(ids(report(b, onlyA))).toContain("RG106");
+  });
+
+  it("RG106: decodes JSON escapes in a static JSON header", () => {
+    const b = wf().node({
+      name: "Post",
+      type: T.http,
+      typeVersion: 4.2,
+      parameters: { method: "POST", url: "https://quickbooks.api.intuit.com/v3/company/111/bill", sendHeaders: true, specifyHeaders: "json", jsonHeaders: '{"Authoriz\\u0061tion": "\\u0042earer abcdefghijklmnop"}' },
+    });
+    expect(ids(report(b, onlyA))).toContain("RG106");
+  });
+
+  it("marks a write tool no agent uses as not connected, not as approved", () => {
+    const b = wf().node({ name: "Loose tool", type: T.qboTool, parameters: create, credentials: credA });
+    expect(report(b, onlyA).touchpoints[0]?.approval).toBe("unattached");
+  });
+
+  it("RG105: a shared lookup node pairs token and company only when both read the same item", () => {
+    const build = (realmPick: string) =>
+      wf()
+        .node({ name: "Tenant lookup", type: T.http, parameters: { url: "https://vault.example.com/tenant" } })
+        .node({
+          name: "Post bill",
+          type: T.http,
+          typeVersion: 4.2,
+          parameters: {
+            method: "POST",
+            url: `=https://quickbooks.api.intuit.com/v3/company/{{ $('Tenant lookup').${realmPick}.json.realmId }}/bill`,
+            sendHeaders: true,
+            headerParameters: { parameters: [{ name: "Authorization", value: "=Bearer {{ $('Tenant lookup').first().json.token }}" }] },
+          },
+        })
+        .chain("Tenant lookup", "Post bill");
+    expect(report(build("first()"), both).findings.find((f) => f.ruleId === "RG105")?.severity).toBe("medium");
+    expect(report(build("last()"), both).findings.find((f) => f.ruleId === "RG105")?.severity).toBe("high");
+  });
+
+  it("signs a fixed string written as an expression", () => {
+    const rule = { conditions: { conditions: [{ leftValue: "={{ $json.Decision }}", rightValue: "={{ 'Send it' }}", operator: { type: "string", operation: "equals" } }], combinator: "and" } };
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Ask", type: T.wait, typeVersion: 1.1, parameters: { resume: "form", formFields: { values: [{ fieldLabel: "Decision" }] } } })
+      .node({ name: "Route", type: "n8n-nodes-base.switch", typeVersion: 3.2, parameters: { rules: { values: [rule] } } })
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .chain("Daily", "Ask", "Route", "Create A");
+    expect(report(b, onlyA).verdict).toBe("clear");
   });
 });

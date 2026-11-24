@@ -136,24 +136,25 @@ const slug = (s: string) =>
 
 /** A starting manifest: one tenant per QuickBooks credential the workflow uses. */
 export function draftManifest(workflow: Workflow): string {
+  // Display label -> the value the manifest matches on: the name, or the id when there's none.
   const creds = new Map<string, string>();
   const realms = new Map<string, string[]>();
   for (const tp of findTouchpoints(workflow)) {
     if (tp.auth.kind === "credential" && tp.auth.credential && tp.auth.credentialType === QBO_CREDENTIAL_TYPE) {
-      const label = credentialLabel(tp.auth.credential);
-      creds.set(label, label);
+      const c = tp.auth.credential;
+      creds.set(credentialLabel(c), c.name ?? c.id ?? "");
     }
     if (tp.realm.kind === "literal") realms.set(tp.realm.id, [...(realms.get(tp.realm.id) ?? []), tp.node.name]);
   }
 
   const used = new Set<string>();
-  const tenants = [...creds.keys()].map((label) => {
+  const tenants = [...creds].map(([label, match]) => {
     let id = slug(label);
     for (let n = 2; used.has(id); n++) id = `${slug(label)}-${String(n)}`;
     used.add(id);
-    return { id, label };
+    return { id, label, match };
   });
-  if (tenants.length === 0) tenants.push({ id: "client-1", label: "" });
+  if (tenants.length === 0) tenants.push({ id: "client-1", label: "", match: "" });
 
   const q = (s: string) => JSON.stringify(s);
   const lines = [
@@ -162,13 +163,14 @@ export function draftManifest(workflow: Workflow): string {
     "# QuickBooks company IDs (realm IDs) that belong to each client.",
     "version: 1",
     "# Clients this workflow may touch. Remove the ones it shouldn't.",
-    `scope: [${tenants.map((t) => t.id).join(", ")}]`,
+    // Quoted, so an id like "true" or "null" stays a string.
+    `scope: [${tenants.map((t) => q(t.id)).join(", ")}]`,
     "tenants:",
   ];
   for (const t of tenants) {
-    lines.push(`  - id: ${t.id}`);
+    lines.push(`  - id: ${q(t.id)}`);
     lines.push(`    name: ${q(t.label || "Client name")}  # rename to the client's name`);
-    lines.push(`    credentials: [${t.label ? q(t.label) : ""}]`);
+    lines.push(`    credentials: [${t.match ? q(t.match) : ""}]`);
     lines.push("    realmIds: []");
   }
   if (realms.size > 0) {

@@ -172,7 +172,8 @@ export function buildContext(workflow: Workflow, manifest: Manifest | undefined)
   const touched = new Set(touchpoints.flatMap((t) => t.tenants));
   const dynamicRealm = touchpoints.some((t) => t.realm.kind === "expression" || t.auth.kind === "dynamic-token");
   const scope = new Set(manifest ? manifest.scope : touched);
-  const multiClient = manifest ? scope.size >= 2 : touched.size >= 2 || dynamicRealm;
+  // Scope says what's allowed; the steps say what happens. Two clients either way is multi-client.
+  const multiClient = manifest ? scope.size >= 2 || touched.size >= 2 : touched.size >= 2 || dynamicRealm;
 
   return {
     workflow,

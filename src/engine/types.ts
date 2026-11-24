@@ -71,7 +71,8 @@ export interface Finding {
 
 export type TouchpointKind = "quickbooks-node" | "quickbooks-tool" | "http" | "http-tool";
 
-export type Approval = "gated" | "unchecked" | "ungated" | "manual-only" | "not-a-write";
+/** `unattached`: a write tool no agent can call, so it never runs. */
+export type Approval = "gated" | "unchecked" | "ungated" | "manual-only" | "not-a-write" | "unattached";
 
 export interface Touchpoint {
   node: string;

@@ -36,7 +36,8 @@ describe("scanText", () => {
     const s = SAMPLES[0];
     if (!s) throw new Error("no samples");
     const r = scanText(s.workflow, "");
-    expect(r.ok && r.report.hasManifest).toBe(false);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.report.hasManifest).toBe(false);
   });
 
   it("labels which input an error came from", () => {

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import urlsplit
 
 from playwright.sync_api import Page, expect, sync_playwright
 
@@ -183,6 +184,65 @@ def keyboard_check(page: Page) -> list[tuple[str, bool, str]]:
     ]
 
 
+# Delays reads of files named slow*.json, so a test can change the selection mid-read.
+SLOW_READS = """
+const text = Blob.prototype.text;
+File.prototype.text = function () {
+  const read = text.call(this);
+  return this.name.startsWith("slow") ? new Promise((r) => setTimeout(() => r(read), 800)) : read;
+};
+"""
+
+FILTER_WORKFLOW = {
+    "name": "Filter test",
+    "nodes": [{"name": "Post", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "parameters": {"method": "POST", "url": "=https://quickbooks.api.intuit.com/v3/company/{{ $fromAI('realmId') }}/bill"}}],
+    "connections": {},
+}
+
+
+def recovery_checks(page: Page) -> list[tuple[str, bool, str]]:
+    """Input states a user can hit by changing their mind halfway."""
+    r = []
+    page.reload()
+    page.get_by_role("button", name=re.compile("Switch to (dark|light) theme"))  # page is up
+
+    # An oversized file's error goes away once valid text is pasted.
+    page.locator("input[type=file]").nth(0).set_input_files({"name": "big.json", "mimeType": "application/json", "buffer": b" " * (5 * 1024 * 1024 + 1)})
+    expect(page.get_by_text("big.json is 5.0 MB", exact=False)).to_be_visible()
+    page.get_by_role("button", name="Paste instead").first.click()
+    page.locator("#workflow-text").fill(json.dumps(FILTER_WORKFLOW))
+    expect(page.get_by_test_id("verdict")).to_be_visible()
+    r.append(("pasting valid text clears an old file error", page.get_by_text("big.json is 5.0 MB", exact=False).count() == 0, ""))
+
+    # A severity filter whose severity disappears falls back to all findings.
+    findings = page.locator("[aria-labelledby=findings-heading] li > button")
+    filters = page.get_by_role("group", name="Filter findings by severity")
+    filters.get_by_role("button", name=re.compile(r"^Critical")).click()
+    page.locator("#workflow-text").fill(json.dumps(FILTER_WORKFLOW).replace("$fromAI('realmId')", "$json.realmId"))
+    expect(filters.get_by_role("button", name=re.compile(r"^High"))).to_be_visible()
+    r.append(("a filter for a severity that's gone shows every finding", findings.count() >= 3, str(findings.count())))
+    page.get_by_role("button", name="Clear workflow export").click()
+
+    # A file read that finishes after the user loaded a sample doesn't replace the sample.
+    page.locator("input[type=file]").nth(0).set_input_files({"name": "slow.json", "mimeType": "application/json", "buffer": json.dumps(FILTER_WORKFLOW).encode()})
+    page.locator("aside[aria-label=Inputs]").get_by_role("button", name=re.compile("^Reviewed bill entry")).click()
+    expect(page.get_by_test_id("verdict")).to_have_text("No boundary issues found")
+    page.wait_for_timeout(1200)
+    label = page.get_by_test_id("workflow-label").inner_text()
+    r.append(("a late file read doesn't replace a newer choice", label != "slow.json" and verdict(page) == "No boundary issues found", label))
+    page.get_by_role("button", name="Clear workflow export").click()
+    page.get_by_role("button", name="Clear client manifest").click()
+    return r
+
+
+def same_origin(url: str, origin: str) -> bool:
+    """Exact scheme, host and port, so localhost:41730 doesn't pass for localhost:4173."""
+    if origin == "file://":
+        return url.startswith("file://")
+    a, b = urlsplit(url), urlsplit(origin)
+    return (a.scheme, a.hostname, a.port or {"http": 80, "https": 443}.get(a.scheme)) == (b.scheme, b.hostname, b.port or {"http": 80, "https": 443}.get(b.scheme))
+
+
 def run(base: str, as_file: bool, dark: bool) -> dict:
     os.makedirs(SHOTS, exist_ok=True)
     summary = {"checks": [], "errors": [], "outside_requests": []}
@@ -194,13 +254,14 @@ def run(base: str, as_file: bool, dark: bool) -> dict:
         for name, (w, h) in VIEWPORTS.items():
             for scheme in ["light", "dark"] if dark else ["light"]:
                 ctx = browser.new_context(viewport={"width": w, "height": h}, color_scheme=scheme, permissions=["clipboard-read", "clipboard-write"])
+                ctx.add_init_script(SLOW_READS)
                 page = ctx.new_page()
                 label = f"{'file' if as_file else 'served'}-{name}-{scheme}"
                 errors = []
 
                 def guard(route, _l=label):
                     u = route.request.url
-                    if u.startswith(origin) or u.startswith("data:") or u.startswith("blob:"):
+                    if same_origin(u, origin) or u.startswith("data:") or u.startswith("blob:"):
                         route.continue_()
                     else:
                         summary["outside_requests"].append(f"{_l}: {u}")
@@ -219,7 +280,7 @@ def run(base: str, as_file: bool, dark: bool) -> dict:
                 def full(step, _l=label, _p=page):
                     full_shot(_p, f"{SHOTS}/{_l}-{step}.png")
 
-                checks = journey(page, shot, full, label) + keyboard_check(page)
+                checks = journey(page, shot, full, label) + keyboard_check(page) + recovery_checks(page)
                 for c, ok, note in checks:
                     summary["checks"].append({"viewport": label, "check": c, "passed": ok, "note": note})
                 summary["errors"] += [f"{label}: {e}" for e in dict.fromkeys(errors)]

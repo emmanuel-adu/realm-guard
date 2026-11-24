@@ -70,7 +70,7 @@ export class Graph {
 
     for (const n of this.byName.values()) {
       const names = new Set<string>();
-      for (const [, value] of stringLeaves(n.parameters)) for (const r of referencedNodes(value)) if (r !== n.name && this.byName.has(r)) names.add(r);
+      for (const value of stringLeaves(n.parameters)) for (const r of referencedNodes(value)) if (r !== n.name && this.byName.has(r)) names.add(r);
       if (names.size > 0) this.refs.set(n.name, [...names]);
     }
   }

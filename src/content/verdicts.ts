@@ -7,7 +7,7 @@ export const VERDICTS: Record<Verdict, { label: string; summary: string }> = {
   },
   "not-verified": {
     label: "Not verified",
-    summary: "Nothing failed, but parts of the workflow couldn't be checked. See what the scan couldn't see.",
+    summary: "Parts of the workflow couldn't be checked, so this isn't a clean result. See what the scan couldn't see.",
   },
   review: {
     label: "Review before running",
@@ -44,6 +44,7 @@ export const APPROVAL_LABEL: Record<Approval, string> = {
   ungated: "No approval",
   "manual-only": "Manual run only",
   "not-a-write": "Read only",
+  unattached: "Not connected to an agent",
 };
 
 export const AUTH_LABEL: Record<Touchpoint["auth"], string> = {

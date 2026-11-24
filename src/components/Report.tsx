@@ -29,6 +29,7 @@ const APPROVAL_DOT: Record<Approval, string> = {
   "manual-only": "bg-medium",
   gated: "bg-clear",
   "not-a-write": "bg-rule-strong",
+  unattached: "bg-rule-strong",
 };
 
 async function copyText(text: string): Promise<boolean> {
@@ -213,9 +214,12 @@ function FindingRow({ finding, open, onToggle }: { finding: Finding; open: boole
 }
 
 function Findings({ findings }: { findings: Finding[] }) {
-  const [filter, setFilter] = useState<Severity | "all">("all");
+  const [picked, setFilter] = useState<Severity | "all">("all");
   const [openKey, setOpenKey] = useState<string | null>(() => (findings[0] ? key(findings[0]) : null));
   const present = SEVERITY_ORDER.filter((s) => findings.some((f) => f.severity === s));
+  // A re-scan can change severities without changing which findings there are, so a filter for
+  // a severity that's no longer present falls back to all instead of showing an empty list.
+  const filter = picked !== "all" && present.includes(picked) ? picked : "all";
   const shown = filter === "all" ? findings : findings.filter((f) => f.severity === filter);
 
   return (

@@ -56,7 +56,7 @@ Without a manifest you still get the agent, approval and state checks. Each cred
 | RG102 | Another client's credential, the classic copied-workflow mistake | Critical |
 | RG103 | A QuickBooks step with no credential in the export | Medium, and it blocks a clean verdict |
 | RG104 | One credential mapped to, or used against, several clients | High |
-| RG105 | An Authorization header built from workflow data. The report names the sources, never the expression | High, or medium when the token and company ID come from the same lookup |
+| RG105 | An Authorization header built from workflow data. The report names the sources, never the expression | High, or medium when the token and company ID read the same item of the same lookup |
 | RG106 | A token pasted into the node, even inside an expression or in a header list it no longer sends | High |
 | **Unpinned client IDs** | | |
 | RG201 | A company ID that comes from data | High, critical when an AI model picks it |

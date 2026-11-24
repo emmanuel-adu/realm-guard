@@ -379,6 +379,7 @@ describe("approvals", () => {
     );
     expect(ids(r)).not.toContain("RG401");
     expect(ids(r)).not.toContain("RG403");
+    expect(r.touchpoints.find((t) => t.node === "Make")?.approval).toBe("gated");
   });
 
   it("RG401: still flags the write when one branch skips the approval", () => {
