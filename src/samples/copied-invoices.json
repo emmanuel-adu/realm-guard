@@ -1,0 +1,173 @@
+{
+  "name": "Monthly invoices - Harbor Dental",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "months"
+            }
+          ]
+        }
+      },
+      "id": "5f1c0001-0000-4000-8000-000000000001",
+      "name": "First of the month",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "1Harbor"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gid=0"
+        }
+      },
+      "id": "5f1c0002-0000-4000-8000-000000000002",
+      "name": "Read billable hours",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        440,
+        300
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "gS1",
+          "name": "Ops Google account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "name": "Amount",
+              "value": "={{ $json.hours * $json.rate }}",
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "id": "5f1c0003-0000-4000-8000-000000000003",
+      "name": "Shape invoice lines",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "invoice",
+        "operation": "create",
+        "CustomerRef": "={{ $json.customerId }}",
+        "Line": [
+          {
+            "DetailType": "SalesItemLineDetail",
+            "Amount": "={{ $json.Amount }}",
+            "itemId": "1"
+          }
+        ],
+        "additionalFields": {}
+      },
+      "id": "5f1c0004-0000-4000-8000-000000000004",
+      "name": "Create invoice",
+      "type": "n8n-nodes-base.quickbooks",
+      "typeVersion": 1,
+      "position": [
+        880,
+        300
+      ],
+      "credentials": {
+        "quickBooksOAuth2Api": {
+          "id": "Qm7tR2",
+          "name": "QBO - Pine Street Bakery"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "invoice",
+        "operation": "send",
+        "invoiceId": "={{ $json.Id }}",
+        "email": "={{ $('Read billable hours').item.json.email }}"
+      },
+      "id": "5f1c0005-0000-4000-8000-000000000005",
+      "name": "Email invoice",
+      "type": "n8n-nodes-base.quickbooks",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        300
+      ],
+      "credentials": {
+        "quickBooksOAuth2Api": {
+          "id": "aB3kP9",
+          "name": "QBO - Harbor Dental"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "First of the month": {
+      "main": [
+        [
+          {
+            "node": "Read billable hours",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read billable hours": {
+      "main": [
+        [
+          {
+            "node": "Shape invoice lines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Shape invoice lines": {
+      "main": [
+        [
+          {
+            "node": "Create invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create invoice": {
+      "main": [
+        [
+          {
+            "node": "Email invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* Tokens follow the reference lock in DECISIONS.md. Severity colors are signals only:
+   badges, the verdict and the severity bar. Nothing else uses them. */
+:root {
+  --canvas: #ffffff;
+  --wash: #f8fafc;
+  --panel: #ffffff;
+  --rule: #e4e7ec;
+  --rule-strong: #d0d5dd;
+  --ink: #0f172a;
+  --body: #344054;
+  --muted: #5b6475;
+  --faint: #8a93a3;
+  --action: #0f172a;
+  --action-ink: #ffffff;
+  --focus: #2563eb;
+  --sev-critical: #b42318;
+  --sev-high: #c2410c;
+  --sev-medium: #a16207;
+  --sev-low: #475467;
+  --sev-clear: #067647;
+  --sev-unverified: #475467;
+  --tint: 10%;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --canvas: #0d1117;
+  --wash: #11161e;
+  --panel: #151a22;
+  --rule: #262d38;
+  --rule-strong: #343c4a;
+  --ink: #f1f4f9;
+  --body: #cdd3dd;
+  --muted: #9aa3b2;
+  --faint: #6f7888;
+  --action: #f1f4f9;
+  --action-ink: #0d1117;
+  --focus: #6ea8fe;
+  --sev-critical: #f97066;
+  --sev-high: #fb923c;
+  --sev-medium: #fac515;
+  --sev-low: #98a2b3;
+  --sev-clear: #47cd89;
+  --sev-unverified: #98a2b3;
+  --tint: 16%;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --color-canvas: var(--canvas);
+  --color-wash: var(--wash);
+  --color-panel: var(--panel);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-ink: var(--ink);
+  --color-body: var(--body);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-action: var(--action);
+  --color-action-ink: var(--action-ink);
+  --color-focus: var(--focus);
+  --color-critical: var(--sev-critical);
+  --color-high: var(--sev-high);
+  --color-medium: var(--sev-medium);
+  --color-low: var(--sev-low);
+  --color-clear: var(--sev-clear);
+  --color-unverified: var(--sev-unverified);
+}
+
+/* Element defaults live in the base layer so utilities such as `truncate` can override them;
+   unlayered rules would beat every Tailwind utility. */
+@layer base {
+  html {
+    background: var(--canvas);
+    color: var(--body);
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: var(--ink);
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: 6px;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--focus) 25%, transparent);
+  }
+}
+
+/* A tinted surface in a severity color, for badges and the verdict mark. */
+.tint {
+  background: color-mix(in srgb, currentColor var(--tint), transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

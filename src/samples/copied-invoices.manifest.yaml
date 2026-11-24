@@ -1,0 +1,17 @@
+# Clients this firm keeps books for, and how n8n connects to each.
+version: 1
+# This copy of the workflow is for Harbor Dental only.
+scope: [harbor-dental]
+tenants:
+  - id: harbor-dental
+    name: Harbor Dental
+    credentials: ["QBO - Harbor Dental"]
+    realmIds: ["9130354772541234"]
+  - id: pine-street
+    name: Pine Street Bakery
+    credentials: ["QBO - Pine Street Bakery"]
+    realmIds: ["4620816365181712"]
+  - id: oakline
+    name: Oakline Studio
+    credentials: ["QBO - Oakline Studio"]
+    realmIds: ["1386066315407890"]

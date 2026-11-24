@@ -1,0 +1,339 @@
+{
+  "name": "Month-end AP agent (all clients)",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "labelIds": [
+            "Label_bills"
+          ]
+        }
+      },
+      "id": "5f1c0001-0000-4000-8000-000000000001",
+      "name": "New bill email",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gm1",
+          "name": "AP inbox"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://vault.internal.example/clients/token",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "client",
+              "value": "={{ $json.to }}"
+            }
+          ]
+        }
+      },
+      "id": "5f1c0002-0000-4000-8000-000000000002",
+      "name": "Fetch client token",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Enter this bill for the right client: {{ $('New bill email').item.json.snippet }}"
+      },
+      "id": "5f1c0003-0000-4000-8000-000000000003",
+      "name": "AP agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list"
+        }
+      },
+      "id": "5f1c0004-0000-4000-8000-000000000004",
+      "name": "OpenAI model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.2,
+      "position": [
+        400,
+        520
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "oa1",
+          "name": "OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "ap-agent"
+      },
+      "id": "5f1c0005-0000-4000-8000-000000000005",
+      "name": "Agent memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryPostgresChat",
+      "typeVersion": 1.3,
+      "position": [
+        520,
+        520
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "pg1",
+          "name": "Ops Postgres"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "vendor",
+        "operation": "getAll",
+        "returnAll": false
+      },
+      "id": "5f1c0006-0000-4000-8000-000000000006",
+      "name": "Harbor vendor lookup",
+      "type": "n8n-nodes-base.quickbooksTool",
+      "typeVersion": 1,
+      "position": [
+        640,
+        520
+      ],
+      "credentials": {
+        "quickBooksOAuth2Api": {
+          "id": "aB3kP9",
+          "name": "QBO - Harbor Dental"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "bill",
+        "operation": "create",
+        "VendorRef": "={{ $fromAI('vendorId') }}",
+        "Line": [
+          {
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "Amount": "={{ $fromAI('amount') }}"
+          }
+        ]
+      },
+      "id": "5f1c0007-0000-4000-8000-000000000007",
+      "name": "Pine Street create bill",
+      "type": "n8n-nodes-base.quickbooksTool",
+      "typeVersion": 1,
+      "position": [
+        760,
+        520
+      ],
+      "credentials": {
+        "quickBooksOAuth2Api": {
+          "id": "Qm7tR2",
+          "name": "QBO - Pine Street Bakery"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "Run a QuickBooks query for a client",
+        "url": "=https://quickbooks.api.intuit.com/v3/company/{{ $fromAI('realmId', 'QuickBooks company ID') }}/query",
+        "method": "POST",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "quickBooksOAuth2Api"
+      },
+      "id": "5f1c0008-0000-4000-8000-000000000008",
+      "name": "Query any company",
+      "type": "n8n-nodes-base.httpRequestTool",
+      "typeVersion": 4.2,
+      "position": [
+        880,
+        520
+      ],
+      "credentials": {
+        "quickBooksOAuth2Api": {
+          "id": "Zx4wN8",
+          "name": "QBO - Oakline Studio"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://quickbooks.api.intuit.com/v3/company/{{ $json.realmId }}/journalentry",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $('Fetch client token').item.json.access_token }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.entry }}"
+      },
+      "id": "5f1c0009-0000-4000-8000-000000000009",
+      "name": "Post journal entry",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        700,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const memo = $getWorkflowStaticData('global');\nmemo.lastVendor = $json.vendor;\nreturn $input.all();"
+      },
+      "id": "5f1c0010-0000-4000-8000-000000000010",
+      "name": "Remember last vendor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        940,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "New bill email": {
+      "main": [
+        [
+          {
+            "node": "Fetch client token",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch client token": {
+      "main": [
+        [
+          {
+            "node": "AP agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AP agent": {
+      "main": [
+        [
+          {
+            "node": "Post journal entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Post journal entry": {
+      "main": [
+        [
+          {
+            "node": "Remember last vendor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AP agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Agent memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AP agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Harbor vendor lookup": {
+      "ai_tool": [
+        [
+          {
+            "node": "AP agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pine Street create bill": {
+      "ai_tool": [
+        [
+          {
+            "node": "AP agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Query any company": {
+      "ai_tool": [
+        [
+          {
+            "node": "AP agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {
+    "New bill email": [
+      {
+        "json": {
+          "from": "billing@coastal-supply.example",
+          "to": "ap+harbor@firm.example",
+          "snippet": "Invoice 4471 for dental supplies, $1,284.50"
+        }
+      }
+    ]
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
