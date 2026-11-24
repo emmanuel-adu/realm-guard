@@ -129,6 +129,7 @@ The first row that matches wins:
 | Not verified | Any coverage gap. RG103 always adds one. |
 | Review before running | Only medium or low findings, and no gaps |
 | No boundary issues found | No findings and no gaps |
+| Nothing to check | No QuickBooks steps it recognizes |
 
 You can copy any report as Markdown.
 
