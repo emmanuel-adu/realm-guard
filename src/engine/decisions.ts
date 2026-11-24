@@ -109,8 +109,9 @@ function polarity(c: Condition, reads: (s: string) => boolean): Polarity | undef
   if (sign === 0 || PRESENCE.has(c.op)) return "unknown";
   const value = leftReads ? c.right : c.left;
   let vp = c.op === "true" || c.op === "false" ? 1 : valuePolarity(value);
-  // "Decision equals Send it" reads as choosing that option; a negated unknown value doesn't.
-  if (vp === 0) vp = sign === 1 && typeof value === "string" && value.trim() !== "" ? 1 : 0;
+  // "Decision equals Send it" reads as choosing that option; a negated unknown value doesn't,
+  // and neither does another run-time value, which can be false on a declined run.
+  if (vp === 0) vp = sign === 1 && typeof value === "string" && value.trim() !== "" && !isExpression(value) ? 1 : 0;
   if (vp === 0) return "unknown";
   return sign * vp > 0 ? "approved" : "declined";
 }

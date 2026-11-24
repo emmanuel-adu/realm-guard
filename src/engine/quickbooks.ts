@@ -72,7 +72,8 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
     // variable can return a path that isn't in the text, so the path stays unknown and a POST
     // counts as a write.
     // Interpolations are blanked first, so a path inside `${a || "111/query"}` never counts.
-    const template = /^\s*\{\{\s*`([^`]*)`\s*\}\}\s*$/.exec(url)?.[1]?.replace(/\$\{[^}]*\}/g, "\u0000");
+    const raw = /^\s*\{\{\s*`([^`]*)`\s*\}\}\s*$/.exec(url)?.[1];
+    const template = raw === undefined ? undefined : maskInterpolations(raw);
     const paths = template === undefined ? [] : [...template.matchAll(/\/v3\/company\/[^/?#]*\/([a-z0-9]+)(?=$|[/?#])/gi)].map((m) => (m[1] ?? "").toLowerCase());
     const realm: RealmSource = { kind: "expression", expr: url };
     return paths.length === 1 && paths[0] ? { realm, path: paths[0] } : { realm, path: "", pathIsExpression: true };
@@ -97,6 +98,37 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
   else if (/^\d+$/.test(segment)) realm = { kind: "literal", id: segment };
   else realm = { kind: "unknown" };
   return pathIsExpression ? { realm, path, pathIsExpression } : { realm, path };
+}
+
+/**
+ * Replaces each `${...}` in a template literal with one NUL. Counts braces and skips quoted
+ * strings, so `${({}).a || "111/query"}` is masked whole. An unclosed one masks to the end.
+ */
+function maskInterpolations(template: string): string {
+  let out = "";
+  let i = 0;
+  while (i < template.length) {
+    if (!template.startsWith("${", i)) {
+      out += template.charAt(i);
+      i++;
+      continue;
+    }
+    let depth = 0;
+    let quote: string | undefined;
+    let j = i + 1;
+    for (; j < template.length; j++) {
+      const ch = template.charAt(j);
+      if (quote) {
+        if (ch === "\\") j++;
+        else if (ch === quote) quote = undefined;
+      } else if (ch === '"' || ch === "'") quote = ch;
+      else if (ch === "{") depth++;
+      else if (ch === "}" && --depth === 0) break;
+    }
+    out += "\u0000";
+    i = j + 1;
+  }
+  return out;
 }
 
 function insideExpression(url: string, at: number): boolean {

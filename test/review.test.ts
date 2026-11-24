@@ -709,3 +709,33 @@ describe("round three", () => {
     expect(r.coverage.gaps.join(" ")).toMatch(/QBO A.*QBO Zed/);
   });
 });
+
+describe("round four", () => {
+  const gatedBy = (decision: Record<string, unknown>, typeVersion = 2.2) =>
+    wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Approve", type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+      .node({ name: "Check", type: "n8n-nodes-base.if", typeVersion, parameters: decision })
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .chain("Daily", "Approve", "Check", "Create A");
+
+  it("RG403: comparing the answer with another run-time value doesn't sign it", () => {
+    const v2 = { conditions: { conditions: [{ leftValue: "={{ $json.data.approved }}", rightValue: "={{ $json.expectedApproval }}", operator: { type: "boolean", operation: "equals" } }] } };
+    const v1 = { conditions: { boolean: [{ value1: "={{ $json.data.approved }}", value2: "={{ $('Daily').item.json.expected }}" }] } };
+    expect(ids(report(gatedBy(v2), onlyA))).toContain("RG403");
+    expect(ids(report(gatedBy(v1, 1), onlyA))).toContain("RG403");
+  });
+
+  it("still signs a comparison with a fixed value written as an expression", () => {
+    const v2 = { conditions: { conditions: [{ leftValue: "={{ $json.data.approved }}", rightValue: "={{ true }}", operator: { type: "boolean", operation: "equals" } }] } };
+    expect(report(gatedBy(v2), onlyA).verdict).toBe("clear");
+  });
+
+  it("masks interpolation code with nested braces before reading a template path", () => {
+    const url = '={{ `https://quickbooks.api.intuit.com/v3/company/${({}).a || $json.endpoint || "111/query/x"}` }}';
+    const b = wf().node({ name: "Call", type: T.http, typeVersion: 4.2, parameters: { method: "POST", url }, credentials: credA });
+    expect(report(b, onlyA).touchpoints[0]?.write).toBe(true);
+    const fixed = wf().node({ name: "Call", type: T.http, typeVersion: 4.2, parameters: { method: "POST", url: "={{ `https://quickbooks.api.intuit.com/v3/company/${$json.realm}/query` }}" }, credentials: credA });
+    expect(report(fixed, onlyA).touchpoints[0]?.write).toBe(false);
+  });
+});
