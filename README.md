@@ -45,7 +45,7 @@ flowchart TD
   - Each IF and Switch output stays separate, so a write on the "no" branch doesn't count as approved.
 - **QuickBooks steps.** Each step gets a company ID, an auth source and a read or write flag. A step is the QuickBooks node, its AI-tool version or an HTTP call to the QuickBooks API.
 - **Client map.** The manifest ties each credential and company ID to a client. Without one, each credential or company ID stands in for a client.
-- **Coverage gaps.** Anything it can't read becomes a gap, such as a missing credential or a sub-workflow. Any gap rules out a clean verdict.
+- **Coverage gaps.** Parts of a QuickBooks step it can't read become gaps, such as a missing credential, an unreadable company ID or a sub-workflow. Any gap rules out a clean verdict. A step it never recognizes can't become a gap, so see the limitations below.
 
 The engine lives in `src/engine` and has no DOM code, so a CLI or CI check can wrap it later.
 
@@ -117,20 +117,25 @@ These steps count as asking a person:
 
 n8n moves on after Send and Wait whatever the person clicks. The write has to sit on the "yes" output of an IF, Switch or Filter that reads the answer, such as `{{ $json.data.approved }}` is true. A check on anything else, like the amount, doesn't count.
 
+Nodes under `approvalNodes` are trusted as complete review steps, and their answers aren't checked. List only steps that block the write on their own.
+
 ### Verdicts
+
+The first row that matches wins:
 
 | Verdict | When |
 | :-- | :-- |
-| Fix before running | Any critical or high finding |
-| Not verified | Part of the workflow couldn't be checked |
-| Review before running | Only medium or low findings |
-| No boundary issues found | Every QuickBooks step was checked and passed |
+| Fix before running | Any critical or high finding, even if parts couldn't be checked |
+| Not verified | Any coverage gap. RG103 always adds one. |
+| Review before running | Only medium or low findings, and no gaps |
+| No boundary issues found | No findings and no gaps |
 
 You can copy any report as Markdown.
 
 ## Limitations
 
 - It reads the export only. It never runs the workflow or calls QuickBooks.
+- It spots HTTP calls to QuickBooks by the URL or a QuickBooks credential. An HTTP Request whose whole URL is an expression and that uses another credential isn't recognized, so check those by hand.
 - Xero, Make and Zapier aren't covered yet.
 - Sub-workflows are listed but not opened, so scan each one on its own.
 - For a company ID or token that comes from an expression, it can say where the value comes from. It can't say whether the lookup is right.
