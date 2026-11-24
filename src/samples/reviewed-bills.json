@@ -1,0 +1,198 @@
+{
+  "name": "Bill entry with review - Harbor Dental",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {
+          "labelIds": [
+            "Label_harbor_bills"
+          ]
+        }
+      },
+      "id": "5f1c0001-0000-4000-8000-000000000001",
+      "name": "New bill email",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        220,
+        300
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "gm2",
+          "name": "Harbor AP inbox"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "text",
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5-mini",
+          "mode": "list"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=Pull vendor, date and amount from: {{ $json.snippet }}"
+            }
+          ]
+        },
+        "jsonOutput": true
+      },
+      "id": "5f1c0002-0000-4000-8000-000000000002",
+      "name": "Extract bill fields",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        440,
+        300
+      ],
+      "credentials": {
+        "openAiApi": {
+          "id": "oa1",
+          "name": "OpenAI"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0HARBORAP",
+          "mode": "id"
+        },
+        "message": "=Enter this bill for Harbor Dental? {{ $json.message.content.vendor }} {{ $json.message.content.amount }}",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double"
+          }
+        }
+      },
+      "id": "5f1c0003-0000-4000-8000-000000000003",
+      "name": "Ask bookkeeper to approve",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        660,
+        300
+      ],
+      "credentials": {
+        "slackApi": {
+          "id": "sl1",
+          "name": "Firm Slack"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "leftValue": "={{ $json.data.approved }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ]
+        }
+      },
+      "id": "5f1c0004-0000-4000-8000-000000000004",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "bill",
+        "operation": "create",
+        "VendorRef": "={{ $('Extract bill fields').item.json.message.content.vendorId }}",
+        "Line": [
+          {
+            "DetailType": "AccountBasedExpenseLineDetail",
+            "Amount": "={{ $('Extract bill fields').item.json.message.content.amount }}"
+          }
+        ]
+      },
+      "id": "5f1c0005-0000-4000-8000-000000000005",
+      "name": "Create bill",
+      "type": "n8n-nodes-base.quickbooks",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        300
+      ],
+      "credentials": {
+        "quickBooksOAuth2Api": {
+          "id": "aB3kP9",
+          "name": "QBO - Harbor Dental"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New bill email": {
+      "main": [
+        [
+          {
+            "node": "Extract bill fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract bill fields": {
+      "main": [
+        [
+          {
+            "node": "Ask bookkeeper to approve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask bookkeeper to approve": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Create bill",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

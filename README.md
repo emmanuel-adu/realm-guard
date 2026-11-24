@@ -8,21 +8,23 @@ If you run automations for a bunch of clients, it only takes one copied workflow
 
 ## Try it
 
-The whole app is one HTML file. Nothing gets uploaded, there's no server, and it works offline.
-
-- Grab `index.html` from the latest build, open it in a browser, and drop in a workflow. Or click one of the three samples.
-- Or run it locally:
+The whole app is one HTML file with no server behind it, so nothing gets uploaded and it works offline. Build it once and open the file in any browser, then drop in a workflow or click one of the three samples:
 
 ```bash
 npm ci
-npm run dev
+npm run build   # writes dist/index.html
+npm run dev     # or work on it with hot reload
 ```
 
 ## What you give it
 
-**A workflow export.** In n8n, open the workflow, then use the ... menu and Download. Copying all nodes on the canvas works too. Template-site downloads usually strip credential names, and the report will tell you it couldn't verify those steps.
+### The workflow export
 
-**A client manifest (optional).** This tells Realm Guard which n8n credential and which QuickBooks company belongs to which client. You don't have to write it from scratch: drop the workflow in and click "Draft from this workflow".
+In n8n, open the workflow, then use the ... menu and Download. Copying all nodes on the canvas works too. Template-site downloads usually strip credential names, and the report will tell you it couldn't verify those steps.
+
+### The client manifest (optional)
+
+This tells Realm Guard which n8n credential and which QuickBooks company belongs to which client. You don't have to write it from scratch: drop the workflow in and click "Draft from this workflow".
 
 ```yaml
 version: 1
@@ -43,7 +45,7 @@ approvalNodes: ["Airtable review queue"]
 
 JSON works too. Realm IDs keep every digit even if you don't quote them.
 
-Without a manifest you still get the agent, approval and state checks. Each credential or company ID is treated as its own client, so a flow from one company into another still shows up. You just won't get a clean bill of health.
+Without a manifest you still get the agent, approval and state checks. Each credential or company ID is treated as its own client, so a flow from one company into another still shows up, but the verdict can't come out better than "Not verified".
 
 ## What it checks
 
@@ -52,27 +54,30 @@ Without a manifest you still get the agent, approval and state checks. Each cred
 | **Shared credentials** | | |
 | RG101 | A credential that isn't mapped to any client | High |
 | RG102 | Another client's credential, the classic copied-workflow mistake | Critical |
-| RG103 | A QuickBooks step with no credential in the export | Gap |
+| RG103 | A QuickBooks step with no credential in the export | Medium, and it blocks a clean verdict |
 | RG104 | One credential mapped to, or used against, several clients | High |
-| RG105 | An Authorization header built from workflow data | High, or medium when the token and company ID come from the same lookup |
-| RG106 | A token pasted straight into the node | High |
+| RG105 | An Authorization header built from workflow data. The report names the sources, never the expression | High, or medium when the token and company ID read the same item of the same lookup |
+| RG106 | A token pasted into the node, even inside an expression or in a header list it no longer sends | High |
 | **Unpinned client IDs** | | |
 | RG201 | A company ID that comes from data | High, critical when an AI model picks it |
 | RG202 | A company ID that belongs to a client outside the scope | Critical |
 | RG203 | A company ID that isn't in the manifest | High |
 | RG204 | A company ID and a credential that belong to different clients | High |
 | **Cross-client state** | | |
-| RG301 | Data read from one client's books reaching a write into another's | Critical |
+| RG301 | Data read from one client's books reaching a write into another's, including through an agent that writes with a tool | Critical |
 | RG302 | One AI agent holding tools for several clients | High, critical if one writes |
 | RG303 | AI memory with a fixed session key | High in multi-client workflows, medium otherwise |
 | RG304 | Workflow static data in a multi-client workflow | High |
 | **Writes without approval** | | |
 | RG401 | A create, update, delete, send or void with no approval step on the way | High, critical after an AI step, medium for manual-only runs |
 | RG402 | An AI agent write tool with no human review step | Critical |
+| RG403 | An approval step whose answer nothing checks, or a write on the branch that doesn't mean yes | High |
 | **Export hygiene** | | |
 | RG501 | Pinned data saved in the export | Low |
 
-An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`.
+An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter after them reads the answer and the write hangs off the branch that means yes. Realm Guard reads the condition: `{{ $json.data.approved }}` is true, or a form's Decision equals Approve. A check on anything else (the amount, another step's `approved` flag, whether the answer exists) doesn't count, and neither does a branch that also gets a Switch's unmatched items or, with "continue on error", the items whose check failed.
+
+Data flow follows n8n: it passes through disabled nodes, and a write that reads `$('Some node')` gets that node's data even from another branch.
 
 The verdict is **Fix before running** if anything is critical or high, **Not verified** if part of the workflow couldn't be checked, **Review before running** for medium and low findings, and **No boundary issues found** only when every QuickBooks step was fully checked and passed. You can copy any report as Markdown.
 
@@ -80,9 +85,10 @@ The verdict is **Fix before running** if anything is critical or high, **Not ver
 
 - It reads the export. It never runs the workflow or calls QuickBooks, so it can't see what happens at run time.
 - It knows the QuickBooks node, its AI-tool version and HTTP Request calls to the QuickBooks API. Xero, Make and Zapier aren't covered yet.
-- Sub-workflows and community nodes are listed, not opened. Scan each sub-workflow on its own.
+- Sub-workflows are listed, not opened. Scan each one on its own. Community nodes are listed too, and Code, community and MCP nodes that mention QuickBooks are flagged for a manual check.
 - Vector stores aren't checked for per-client namespaces yet.
 - When a company ID or token comes from an expression, it can only tell you where it comes from, not whether the lookup is right.
+- It reads approval checks that compare a plain reference to the answer (`{{ $json.data.approved }}`, not `{{ !$json.data.approved }}`) with true or false, yes or no, approve or reject, or a form option. A check it can't read counts as no check, so RG403 can fire on a check that's fine.
 
 I checked every node type and default against the published n8n packages (`n8n-nodes-base` 2.48.5 and `@n8n/n8n-nodes-langchain` 2.48.6), and ran the engine over 2,066 public workflow exports without a crash.
 
@@ -90,9 +96,9 @@ I checked every node type and default against the published n8n packages (`n8n-n
 
 **Assets:** the workflow export and manifest you load. Exports can hold client names, pinned run data and occasionally a pasted token.
 
-**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run.
+**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run, and never copied into a finding: the report says where a token or company ID comes from (a named node, the incoming item, a variable) instead, because an expression can hold part of a real token. YAML aliases are capped, unknown manifest keys are rejected so a typo can't widen the scope, and names are escaped before they go into the Markdown report.
 
-**External systems:** none. The page makes no network requests. Fonts, styles and code are inlined in the one HTML file, and the end-to-end tests fail if the page tries to reach anything outside itself.
+**External systems:** none. Fonts, styles and code are inlined in the one HTML file, and its Content Security Policy (`default-src 'none'`, `connect-src 'none'`) makes the browser refuse any request the page tries to make. The end-to-end tests also fail if anything leaves the page.
 
 **Dangerous actions and their guards:**
 - Copying the report puts client and node names on your clipboard. It only happens when you click Copy.

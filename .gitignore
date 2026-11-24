@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+e2e/__pycache__
+e2e/.pytest_cache
+*.log
+.DS_Store
+e2e/screenshots
+e2e/results-*.json
