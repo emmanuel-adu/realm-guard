@@ -1,35 +1,65 @@
 # Realm Guard
 
-Check that an n8n workflow stays inside each client's QuickBooks books before you switch it on.
+Checks that an n8n workflow stays inside each client's QuickBooks books before you switch it on.
 
-If you run automations for a bunch of clients, it only takes one copied workflow that still points at the last client's credential, or one AI agent that can reach every company, and entries land in the wrong books. You find out at month-end close, or when a client asks why they're looking at someone else's vendor list. I built Realm Guard to catch that before the workflow runs.
+One copied workflow that still uses the last client's credential is enough to post entries into the wrong client's books. So is one AI agent that can reach every company. I built Realm Guard to catch that from the workflow export, before anything runs.
 
 ![Realm Guard report for a shared AP agent](docs/screenshot.png)
 
-## Try it
-
-The whole app is one HTML file with no server behind it, so nothing gets uploaded and it works offline. Build it once and open the file in any browser, then drop in a workflow or click one of the three samples:
+## Quick start
 
 ```bash
 npm ci
 npm run build   # writes dist/index.html
-npm run dev     # or work on it with hot reload
 ```
+
+Open `dist/index.html` in any browser, then drop in a workflow export or click a sample. The whole app is that one file. It works offline and uploads nothing.
+
+## How it works
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 280}}}%%
+flowchart TD
+  subgraph browser["Your browser, with no network access"]
+    M["<b>Client manifest</b><br/>YAML, optional"] --> PW["<b>Parse</b><br/>read as data, never run"]
+    W["<b>Workflow export</b><br/>n8n JSON"] --> PW
+    PW --> model
+
+    subgraph model["What the scan builds"]
+      direction LR
+      G["<b>Workflow graph</b><br/>data flow, IF branches,<br/>agent tools"] ~~~ S["<b>QuickBooks steps</b><br/>company ID, auth source,<br/>read or write"] ~~~ C["<b>Client map</b><br/>credential or company ID<br/>to client"]
+    end
+
+    model --> GAP["<b>Coverage gaps</b><br/>parts of a step it couldn't read"]
+    model --> R["<b>18 rules</b><br/>credentials, company IDs,<br/>cross-client data, approvals"]
+    GAP --> V(["<b>Verdict</b>"])
+    R --> V
+    V --> OUT["<b>Report</b><br/>in the page or as Markdown"]
+  end
+```
+
+- **Parsing.** Both files are read as data. Expressions in the workflow are never run.
+- **Graph.** The graph follows n8n's runtime, not the canvas:
+  - Data passes through disabled nodes.
+  - A `$('Node')` read counts as data flow.
+  - Each IF and Switch output stays separate, so a write on the "no" branch doesn't count as approved.
+- **QuickBooks steps.** Each step gets a company ID, an auth source and a read or write flag. A step is the QuickBooks node, its AI-tool version or an HTTP call to the QuickBooks API.
+- **Client map.** The manifest ties each credential and company ID to a client. Without one, each credential or company ID stands in for a client.
+- **Coverage gaps.** Parts of a QuickBooks step it can't read become gaps, such as a missing credential, an unreadable company ID or a sub-workflow. Any gap rules out a clean verdict. A step it never recognizes can't become a gap, so see the limitations below.
+
+The engine lives in `src/engine` and has no DOM code, so a CLI or CI check can wrap it later.
 
 ## What you give it
 
-### The workflow export
+- **Workflow export.** In n8n, open the workflow and use **...** > **Download**, or copy every node on the canvas. Template-site downloads usually strip credentials, and the report says when they did.
+- **Client manifest (optional).** It maps credentials and company IDs to clients. Click **Draft from this workflow** to get a starting one.
 
-In n8n, open the workflow, then use the ... menu and Download. Copying all nodes on the canvas works too. Template-site downloads usually strip credential names, and the report will tell you it couldn't verify those steps.
-
-### The client manifest (optional)
-
-This tells Realm Guard which n8n credential and which QuickBooks company belongs to which client. You don't have to write it from scratch: drop the workflow in and click "Draft from this workflow".
+<details>
+<summary>Example manifest</summary>
 
 ```yaml
 version: 1
-# The clients this workflow may touch. Leave it out to allow every tenant below.
-scope: [harbor-dental]
+scope: [harbor-dental]                     # clients this workflow may touch
 tenants:
   - id: harbor-dental
     name: Harbor Dental
@@ -39,86 +69,100 @@ tenants:
     name: Pine Street Bakery
     credentials: ["QBO - Pine Street Bakery"]
     realmIds: ["4620816365181712"]
-# Optional: your own approval steps, if you don't use n8n's Send and Wait.
-approvalNodes: ["Airtable review queue"]
+approvalNodes: ["Airtable review queue"]   # your own review steps, if any
 ```
 
-JSON works too. Realm IDs keep every digit even if you don't quote them.
+JSON works too. Company IDs keep every digit, quoted or not.
 
-Without a manifest you still get the agent, approval and state checks. Each credential or company ID is treated as its own client, so a flow from one company into another still shows up, but the verdict can't come out better than "Not verified".
+</details>
+
+Without a manifest you still get the agent, approval and memory checks. The verdict can't be better than "Not verified", though.
 
 ## What it checks
 
 | Rule | Flags | Severity |
-| --- | --- | --- |
-| **Shared credentials** | | |
+| :-- | :-- | :-- |
+| | **Shared credentials** | |
 | RG101 | A credential that isn't mapped to any client | High |
-| RG102 | Another client's credential, the classic copied-workflow mistake | Critical |
-| RG103 | A QuickBooks step with no credential in the export | Medium, and it blocks a clean verdict |
-| RG104 | One credential mapped to, or used against, several clients | High |
-| RG105 | An Authorization header built from workflow data. The report names the sources, never the expression | High, or medium when the token and company ID read the same item of the same lookup |
-| RG106 | A token pasted into the node, even inside an expression or in a header list it no longer sends | High |
-| **Unpinned client IDs** | | |
-| RG201 | A company ID that comes from data | High, critical when an AI model picks it |
+| RG102 | Another client's credential (the copied-workflow mistake) | Critical |
+| RG103 | A QuickBooks step with no credential in the export | Medium, and no clean verdict |
+| RG104 | One credential serving several clients | High |
+| RG105 | A token built from workflow data at run time | High, or medium if the token and company ID come from the same lookup item |
+| RG106 | A bearer token pasted into the node | High |
+| | **Unpinned client IDs** | |
+| RG201 | A company ID taken from data | High, or critical if an AI picks it |
 | RG202 | A company ID that belongs to a client outside the scope | Critical |
-| RG203 | A company ID that isn't in the manifest | High |
+| RG203 | A company ID missing from the manifest | High |
 | RG204 | A company ID and a credential that belong to different clients | High |
-| **Cross-client state** | | |
-| RG301 | Data read from one client's books reaching a write into another's, including through an agent that writes with a tool | Critical |
-| RG302 | One AI agent holding tools for several clients | High, critical if one writes |
-| RG303 | AI memory with a fixed session key | High in multi-client workflows, medium otherwise |
+| | **Cross-client state** | |
+| RG301 | One client's data written into another client's books | Critical |
+| RG302 | One AI agent with tools for several clients | High, or critical if one writes |
+| RG303 | AI memory with a fixed session key | High in multi-client workflows, otherwise medium |
 | RG304 | Workflow static data in a multi-client workflow | High |
-| **Writes without approval** | | |
-| RG401 | A create, update, delete, send or void with no approval step on the way | High, critical after an AI step, medium for manual-only runs |
-| RG402 | An AI agent write tool with no human review step | Critical |
-| RG403 | An approval step whose answer nothing checks, or a write on the branch that doesn't mean yes | High |
-| **Export hygiene** | | |
-| RG501 | Pinned data saved in the export | Low |
+| | **Writes without approval** | |
+| RG401 | A create, update, delete, send or void with no approval on the way | High, critical after an AI step, medium for manual runs |
+| RG402 | An AI agent's write tool with no human review | Critical |
+| RG403 | An approval whose answer nothing checks, or a write on the "no" branch | High |
+| | **Export hygiene** | |
+| RG501 | Pinned run data saved in the export | Low |
 
-An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter after them reads the answer and the write hangs off the branch that means yes. Realm Guard reads the condition: `{{ $json.data.approved }}` is true, or a form's Decision equals Approve. A check on anything else (the amount, another step's `approved` flag, whether the answer exists) doesn't count, and neither does a branch that also gets a Switch's unmatched items or, with "continue on error", the items whose check failed.
+### What counts as an approval
 
-Data flow follows n8n: it passes through disabled nodes, and a write that reads `$('Some node')` gets that node's data even from another branch.
+These steps count as asking a person:
 
-The verdict is **Fix before running** if anything is critical or high, **Not verified** if part of the workflow couldn't be checked, **Review before running** for medium and low findings, and **No boundary issues found** only when every QuickBooks step was fully checked and passed. You can copy any report as Markdown.
+- Send and Wait in Slack, Gmail or Teams
+- A Wait node that resumes on a form or webhook
+- A human review step on an agent tool
+- Any node you list under `approvalNodes`
+
+n8n moves on after Send and Wait whatever the person clicks. The write has to sit on the "yes" output of an IF, Switch or Filter that reads the answer, such as `{{ $json.data.approved }}` is true. A check on anything else, like the amount, doesn't count.
+
+Nodes under `approvalNodes` are trusted as complete review steps, and their answers aren't checked. List only steps that block the write on their own.
+
+### Verdicts
+
+The first row that matches wins:
+
+| Verdict | When |
+| :-- | :-- |
+| Fix before running | Any critical or high finding, even if parts couldn't be checked |
+| Not verified | Any coverage gap. RG103 always adds one. |
+| Review before running | Only medium or low findings, and no gaps |
+| Nothing to check | No QuickBooks steps it recognizes, and no findings |
+| No boundary issues found | No findings and no gaps |
+
+You can copy any report as Markdown.
 
 ## Limitations
 
-- It reads the export. It never runs the workflow or calls QuickBooks, so it can't see what happens at run time.
-- It knows the QuickBooks node, its AI-tool version and HTTP Request calls to the QuickBooks API. Xero, Make and Zapier aren't covered yet.
-- Sub-workflows are listed, not opened. Scan each one on its own. Community nodes are listed too, and Code, community and MCP nodes that mention QuickBooks are flagged for a manual check.
+- It reads the export only. It never runs the workflow or calls QuickBooks.
+- It spots HTTP calls to QuickBooks by the URL or a QuickBooks credential. An HTTP Request whose whole URL is an expression and that uses another credential isn't recognized, so check those by hand.
+- Xero, Make and Zapier aren't covered yet.
+- Sub-workflows are listed but not opened, so scan each one on its own.
+- For a company ID or token that comes from an expression, it can say where the value comes from. It can't say whether the lookup is right.
+- An approval check it can't read, like `!$json.data.approved`, counts as no check. RG403 can then fire on a check that's actually fine.
 - Vector stores aren't checked for per-client namespaces yet.
-- When a company ID or token comes from an expression, it can only tell you where it comes from, not whether the lookup is right.
-- It reads approval checks that compare a plain reference to the answer (`{{ $json.data.approved }}`, not `{{ !$json.data.approved }}`) with true or false, yes or no, approve or reject, or a form option. A check it can't read counts as no check, so RG403 can fire on a check that's fine.
 
-I checked every node type and default against the published n8n packages (`n8n-nodes-base` 2.48.5 and `@n8n/n8n-nodes-langchain` 2.48.6), and ran the engine over 2,066 public workflow exports without a crash.
+I checked node types and defaults against the published n8n 2.48 packages. The engine has also run over 2,066 public workflow exports without a crash.
 
-## Security notes
+## Security
 
-**Assets:** the workflow export and manifest you load. Exports can hold client names, pinned run data and occasionally a pasted token.
-
-**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run, and never copied into a finding: the report says where a token or company ID comes from (a named node, the incoming item, a variable) instead, because an expression can hold part of a real token. YAML aliases are capped, unknown manifest keys are rejected so a typo can't widen the scope, and names are escaped before they go into the Markdown report.
-
-**External systems:** none. Fonts, styles and code are inlined in the one HTML file, and its Content Security Policy (`default-src 'none'`, `connect-src 'none'`) makes the browser refuse any request the page tries to make. The end-to-end tests also fail if anything leaves the page.
-
-**Dangerous actions and their guards:**
-- Copying the report puts client and node names on your clipboard. It only happens when you click Copy.
-- The theme choice is saved in your browser's local storage. Nothing about your workflows is stored.
-
-**Checks:** `npm audit` reports 0 vulnerabilities. Production dependencies are MIT, ISC and OFL-1.1 (the IBM Plex fonts, see `THIRD_PARTY_NOTICES.md`). A secrets scan of the repo and the build found nothing.
+- Inputs are parsed as JSON and YAML, capped at 5 MB, and never run. Unknown manifest keys are rejected, so a typo can't widen the scope.
+- Findings say where a token comes from and never print the expression itself.
+- The page can't make network requests: its Content Security Policy sets `connect-src 'none'`. The end-to-end tests also fail if anything leaves the page.
+- Nothing about your workflows is stored. Local storage holds only your theme choice. The clipboard is written only when you click Copy.
+- `npm audit` reports no vulnerabilities. Dependencies are MIT, ISC and OFL-1.1 (the fonts, see `THIRD_PARTY_NOTICES.md`).
 
 ## Development
 
 ```bash
-npm run lint        # ESLint with type-aware rules
-npm run typecheck
-npm test            # Vitest: parsers, every rule, samples, Markdown export
-npm run build       # one self-contained dist/index.html
-npm run preview     # serves the build on :4173
-python3 e2e/test_slice.py --base http://localhost:4173/ --dark          # Playwright journey
-python3 e2e/test_slice.py --base dist/index.html --file --dark          # same, from file:// with no server
+npm run check     # lint, typecheck, unit tests, build
+npm run preview   # serves the build on :4173
+python3 e2e/test_slice.py --base http://localhost:4173/ --dark   # Playwright journey
+python3 e2e/test_slice.py --base dist/index.html --file --dark   # same, from file://
 ```
 
-The scanning engine lives in `src/engine` and doesn't touch the DOM, so it can sit behind a CLI or a CI check later. Design and technical choices are in `DECISIONS.md`, and what's next is in `ROADMAP.md`.
+Design and technical choices are in `DECISIONS.md`, and what's next is in `ROADMAP.md`.
 
 ## License
 
