@@ -184,7 +184,7 @@ function FindingRow({ finding, open, onToggle }: { finding: Finding; open: boole
           </span>
         </span>
         <span className="hidden pt-0.5 font-mono text-[12px] text-faint sm:block">{finding.ruleId}</span>
-        <ChevronDown className={`mt-0.5 size-4 shrink-0 text-muted transition-transform ${open ? "rotate-180" : ""}`} aria-hidden="true" />
+        <ChevronDown className={`mt-0.5 size-4 shrink-0 text-muted transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`} aria-hidden="true" />
       </button>
       {open ? (
         <div id={bodyId} className="px-4 pb-5 sm:pr-5 sm:pl-[110px]">

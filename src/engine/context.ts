@@ -119,14 +119,15 @@ export function buildContext(workflow: Workflow, manifest: Manifest | undefined)
   const raw = findTouchpoints(workflow);
   const credOf = (tp: RawTouchpoint) => (tp.auth.kind === "credential" ? tp.auth.credential : undefined);
 
-  // Resolve each credential id's name once, so a reference without the name gets the same
-  // owner and label as one with it, whichever comes first in the file.
+  // Resolve each credential id's name once, from every node in the file (disabled ones too,
+  // since a credential's name doesn't depend on where it's used), so a reference without the
+  // name gets the same owner and label as one with it, whichever comes first.
   const nameById = new Map<string, string>();
-  for (const tp of raw) {
-    const c = credOf(tp);
-    if (!c) continue;
-    tenancy.alias(c);
-    if (c.id && c.name && !nameById.has(c.id)) nameById.set(c.id, c.name);
+  for (const node of workflow.nodes) {
+    for (const c of Object.values(node.credentials)) {
+      tenancy.alias(c);
+      if (c.id && c.name && !nameById.has(c.id)) nameById.set(c.id, c.name);
+    }
   }
   for (const tp of raw) {
     const c = credOf(tp);

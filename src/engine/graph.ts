@@ -31,9 +31,9 @@ export class Graph {
   private readonly toolTargets = new Map<string, string[]>();
   private readonly attached = new Map<string, string[]>();
   private readonly refs = new Map<string, string[]>();
-  /** Disabled nodes with an enabled node somewhere upstream or downstream of them. */
-  private readonly passesFrom = new Set<string>();
-  private readonly passesTo = new Set<string>();
+  /** Disabled nodes with an enabled node somewhere upstream, and somewhere downstream. */
+  private readonly fedByEnabled = new Set<string>();
+  private readonly feedsEnabled = new Set<string>();
 
   constructor(workflow: Workflow) {
     for (const n of workflow.nodes) {
@@ -65,8 +65,8 @@ export class Graph {
       }
     }
 
-    this.markPassThrough(this.passesFrom, (n) => (this.outs.get(n) ?? []).map((o) => o.to));
-    this.markPassThrough(this.passesTo, (n) => this.ins.get(n) ?? []);
+    this.markPassThrough(this.fedByEnabled, (n) => (this.outs.get(n) ?? []).map((o) => o.to));
+    this.markPassThrough(this.feedsEnabled, (n) => this.ins.get(n) ?? []);
 
     for (const n of this.byName.values()) {
       const names = new Set<string>();
@@ -107,11 +107,11 @@ export class Graph {
   }
 
   hasMainParent(name: string) {
-    return (this.ins.get(name) ?? []).some((p) => this.byName.has(p) || this.passesTo.has(p));
+    return (this.ins.get(name) ?? []).some((p) => this.byName.has(p) || this.fedByEnabled.has(p));
   }
 
   hasMainEdges(name: string) {
-    return this.hasMainParent(name) || (this.outs.get(name) ?? []).some((o) => this.byName.has(o.to) || this.passesFrom.has(o.to));
+    return this.hasMainParent(name) || (this.outs.get(name) ?? []).some((o) => this.byName.has(o.to) || this.feedsEnabled.has(o.to));
   }
 
   private through(first: string[], next: (n: string) => string[]): string[] {

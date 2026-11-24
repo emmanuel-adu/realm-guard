@@ -75,7 +75,7 @@ Without a manifest you still get the agent, approval and state checks. Each cred
 | **Export hygiene** | | |
 | RG501 | Pinned data saved in the export | Low |
 
-An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter after them reads the answer and the write hangs off the branch that means yes. Realm Guard reads the condition: `{{ $json.data.approved }}` is true, or a form's Decision equals Approve. A check on anything else, like the amount, doesn't count.
+An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter after them reads the answer and the write hangs off the branch that means yes. Realm Guard reads the condition: `{{ $json.data.approved }}` is true, or a form's Decision equals Approve. A check on anything else (the amount, another step's `approved` flag, whether the answer exists) doesn't count, and neither does a branch that also gets a Switch's unmatched items or, with "continue on error", the items whose check failed.
 
 Data flow follows n8n: it passes through disabled nodes, and a write that reads `$('Some node')` gets that node's data even from another branch.
 
@@ -96,7 +96,7 @@ I checked every node type and default against the published n8n packages (`n8n-n
 
 **Assets:** the workflow export and manifest you load. Exports can hold client names, pinned run data and occasionally a pasted token.
 
-**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run. YAML aliases are capped, unknown manifest keys are rejected so a typo can't widen the scope, and names are escaped before they go into the Markdown report.
+**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run, and never copied into a finding: the report says where a token or company ID comes from (a named node, the incoming item, a variable) instead, because an expression can hold part of a real token. YAML aliases are capped, unknown manifest keys are rejected so a typo can't widen the scope, and names are escaped before they go into the Markdown report.
 
 **External systems:** none. Fonts, styles and code are inlined in the one HTML file, and its Content Security Policy (`default-src 'none'`, `connect-src 'none'`) makes the browser refuse any request the page tries to make. The end-to-end tests also fail if anything leaves the page.
 

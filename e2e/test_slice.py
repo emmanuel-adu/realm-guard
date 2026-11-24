@@ -20,8 +20,15 @@ SHOTS = "e2e/screenshots"
 SAMPLES = "src/samples"
 
 
+def settle(page: Page):
+    """Wait for CSS transitions to finish, so a shot never catches a chevron mid-turn."""
+    # evaluate, not wait_for_function: the page's CSP forbids the eval the latter injects.
+    page.evaluate("() => Promise.all(document.getAnimations().map((a) => a.finished.catch(() => null)))")
+
+
 def full_shot(page: Page, path: str):
     # Resize to the page height instead of full_page, which can drop layers in Chrome.
+    settle(page)
     w, h = page.viewport_size["width"], page.viewport_size["height"]
     height = page.evaluate("document.documentElement.scrollHeight")
     page.set_viewport_size({"width": w, "height": max(h, height)})
@@ -124,7 +131,10 @@ def journey(page: Page, shot, full, label: str) -> list[tuple[str, bool, str]]:
     expect(page.get_by_test_id("verdict")).to_have_text("Fix before running")
     add("agent sample shows nine findings", count_is(findings, 9), str(findings.count()))
     add("a loaded sample shows a file chip, not raw JSON", page.locator("#workflow-text").count() == 0)
-    add("expressions render as inline code", page.locator("[aria-labelledby=findings-heading] li code", has_text="$json.realmId").count() == 1)
+    # Findings never quote workflow expressions (they can hold tokens), so check code spans on a
+    # fix suggestion instead, opened so the overflow check below also covers it on phones.
+    page.locator("[aria-labelledby=findings-heading] li").filter(has_text="AI memory shared across runs").get_by_role("button").first.click()
+    add("expressions render as inline code", page.locator("[aria-labelledby=findings-heading] li code", has_text="$json.clientId").count() == 1)
     add("steps table lists four QuickBooks steps", page.get_by_role("heading", name=re.compile("QuickBooks steps")).is_visible())
     ok, note = no_overflow(page)
     add("no horizontal overflow on agent report", ok, note)
@@ -203,6 +213,7 @@ def run(base: str, as_file: bool, dark: bool) -> dict:
                 page.goto(url, wait_until="networkidle")
 
                 def shot(step, _l=label, _p=page):
+                    settle(_p)
                     _p.screenshot(path=f"{SHOTS}/{_l}-{step}.png")
 
                 def full(step, _l=label, _p=page):

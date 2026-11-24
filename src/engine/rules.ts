@@ -24,9 +24,12 @@ function groupBy<T>(items: T[], key: (t: T) => string | undefined): Map<string, 
   return out;
 }
 
-/** Where a run-time token comes from, in words. Never the expression: it can hold a real token. */
-function tokenSource(expr: string): string {
-  const parts = referencedNodes(expr).map(quote);
+/**
+ * Where a run-time value comes from, in words. Never the expression itself, which can hold a
+ * real token, and never text from `$('...')` unless it's the name of a node in this file.
+ */
+function sourceOf(expr: string, isNode: (name: string) => boolean): string {
+  const parts = referencedNodes(expr).filter(isNode).map(quote);
   if (usesFromAI(expr)) parts.push("the AI model");
   if (usesIncomingItem(expr)) parts.push("the incoming item");
   if (/\$env\b/.test(expr)) parts.push("an environment variable");
@@ -35,6 +38,11 @@ function tokenSource(expr: string): string {
   if (parts.length === 0) return "an expression";
   return parts.length === 1 ? (parts[0] ?? "") : `${parts.slice(0, -1).join(", ")} and ${parts.at(-1) ?? ""}`;
 }
+
+const nodeNames = (ctx: Context) => {
+  const names = new Set(ctx.workflow.nodes.map((n) => n.name));
+  return (name: string) => names.has(name);
+};
 
 const credOf = (tp: Resolved) => (tp.auth.kind === "credential" && tp.auth.credential ? tp.auth.credential : undefined);
 const credKey = (tp: Resolved) => {
@@ -115,9 +123,10 @@ export function credentialRules(ctx: Context): Finding[] {
     }
   }
 
+  const isNode = nodeNames(ctx);
   for (const tp of ctx.touchpoints) {
     if (tp.auth.kind === "dynamic-token") {
-      const tokenRefs = referencedNodes(tp.auth.expr);
+      const tokenRefs = referencedNodes(tp.auth.expr).filter(isNode);
       const realmRefs = tp.realm.kind === "expression" ? referencedNodes(tp.realm.expr) : [];
       const pairedBy = tokenRefs.find((r) => realmRefs.includes(r));
       out.push({
@@ -129,7 +138,7 @@ export function credentialRules(ctx: Context): Finding[] {
         // Names the sources only. The expression itself can hold part of a real token.
         detail: pairedBy
           ? `The Authorization header and the company ID both come from ${quote(pairedBy)}, which keeps them paired.`
-          : `The Authorization header is built at run time from ${tokenSource(tp.auth.expr)}.`,
+          : `The Authorization header is built at run time from ${sourceOf(tp.auth.expr, isNode)}.`,
         why: pairedBy
           ? "Nothing in the workflow proves that lookup returns the right client, so a bad client ID still sends the run to the wrong books."
           : "Which client's token gets used depends on each run's data. A bad client ID or a mixed-up lookup sends one client's token, and data, to another client's company.",
@@ -160,6 +169,7 @@ export function credentialRules(ctx: Context): Finding[] {
 export function clientIdRules(ctx: Context): Finding[] {
   const out: Finding[] = [];
   const { tenancy, scope, manifest, graph } = ctx;
+  const isNode = nodeNames(ctx);
   for (const tp of ctx.touchpoints) {
     const name = tp.node.name;
     if (tp.realm.kind === "expression") {
@@ -178,7 +188,10 @@ export function clientIdRules(ctx: Context): Finding[] {
         severity: aiSource ? "critical" : "high",
         title: aiSource ? "AI picks which company to call" : "Company ID comes from data",
         nodes: [name],
-        detail: `The company (realm) ID in the URL is \`${clip(expr)}\`${aiSource ? `, filled in by ${aiSource === "the AI model" ? aiSource : quote(aiSource)}` : ""}.`,
+        // Sources only: a URL expression can carry a token in its query string.
+        detail: aiSource
+          ? `The company (realm) ID in the URL is filled in by ${aiSource === "the AI model" ? aiSource : quote(aiSource)}.`
+          : `The company (realm) ID in the URL is picked at run time from ${sourceOf(expr, isNode)}.`,
         why: aiSource
           ? "A language model decides whose books this call reaches. A prompt injection or a plain mistake points it at another client."
           : "Whatever is in the incoming data decides whose books this call reaches. A wrong row, a typo or a crafted request sends it to another client.",
@@ -283,23 +296,31 @@ export function crossClientRules(ctx: Context): Finding[] {
 
   // Data read from one client's books reaching a write into another's. A tool write gets
   // whatever its agent was handed, so the agent's own inputs count as the tool's.
-  const foreignSources = (w: Resolved, start: string): Resolved[] => {
+  const sourcesOf = (start: string): Resolved[] => {
     const sources: Resolved[] = [];
     for (const anc of graph.dataSources(start)) {
       const tp = byNode.get(anc);
       if (tp) sources.push(tp);
       sources.push(...(agentTenants.get(anc) ?? []));
     }
-    return sources.filter((s) => s !== w && s.tenants.some((t) => !w.tenants.includes(t)));
+    return sources;
   };
+  // One agent can hold many write tools, so walk each agent's inputs once.
+  const agentSources = new Map<string, Resolved[]>();
+  const foreignTo = (w: Resolved, sources: Resolved[]) => sources.filter((s) => s !== w && s.tenants.some((t) => !w.tenants.includes(t)));
   for (const w of ctx.touchpoints) {
     if (!w.write || w.tenants.length === 0) continue;
     const isTool = w.kind === "quickbooks-tool" || w.kind === "http-tool";
-    let foreign = foreignSources(w, w.node.name);
+    let foreign = foreignTo(w, sourcesOf(w.node.name));
     let agent: string | undefined;
     if (isTool) {
       for (const a of callers.get(w.node.name) ?? []) {
-        const viaAgent = foreignSources(w, a);
+        let upstream = agentSources.get(a);
+        if (!upstream) {
+          upstream = sourcesOf(a);
+          agentSources.set(a, upstream);
+        }
+        const viaAgent = foreignTo(w, upstream);
         if (viaAgent.length === 0) continue;
         agent ??= a;
         foreign = [...foreign, ...viaAgent];
@@ -378,7 +399,7 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
   }
   const gates = new Set(kinds.keys());
   const trustedGates = new Set([...kinds].filter(([, k]) => k === "trusted").map(([n]) => n));
-  const decisions = nodes.filter((n) => isDecision(n.type));
+  const decisions = new Map(nodes.filter((n) => isDecision(n.type)).map((n) => [n.name, n]));
 
   // Entry points: triggers, plus main-flow nodes nothing feeds (a canvas copy or a
   // half-built workflow run with "Execute step").
@@ -405,31 +426,26 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
   // as approved only past an IF, Filter or Switch that reads the answer, on a branch that
   // means yes. A check on anything else (the amount, the vendor) protects nothing.
   const undecided = new Map<string, { gate: string; decision?: string }>();
-  // Gates of one kind share answer keys, so each IF is read once per kind, not once per gate.
-  const checksByKeys = new Map<string, Map<string, Set<number>>>();
   for (const [gate, kind] of kinds) {
     if (kind !== "needs-check") continue;
     const reached = entries.has(gate) || graph.mainParents(gate).some((p) => openAll.has(p));
     if (!reached) continue;
     const gateNode = graph.node(gate);
     if (!gateNode) continue;
+    // Whether an IF checks this gate depends on the gate (`$('Approve')`), so read only the
+    // decisions this gate can reach.
     const keys = answerKeys(gateNode);
-    const cacheKey = keys.join("\u0000");
-    let checks = checksByKeys.get(cacheKey);
-    if (!checks) {
-      checks = new Map<string, Set<number>>();
-      for (const d of decisions) {
-        const approved = approvedOutputs(d, keys);
-        if (approved) checks.set(d.name, approved);
-      }
-      checksByKeys.set(cacheKey, checks);
+    const start = graph.mainChildren(gate);
+    const checks = new Map<string, Set<number>>();
+    for (const n of graph.reach(start, trustedGates)) {
+      const d = decisions.get(n);
+      const approved = d ? approvedOutputs(d, keys, gate) : undefined;
+      if (approved) checks.set(n, approved);
     }
-    const gateChecks = checks;
     const notYes = (d: string) => {
-      const approved = gateChecks.get(d);
+      const approved = checks.get(d);
       return approved ? (o: number) => !approved.has(o) : undefined;
     };
-    const start = graph.mainChildren(gate);
     const unchecked = graph.reach(start, new Set([...trustedGates, ...checks.keys()]));
     const anyBranch = graph.reach(start, trustedGates, notYes);
     for (const n of unchecked) {

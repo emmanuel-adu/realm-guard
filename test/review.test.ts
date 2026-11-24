@@ -356,7 +356,8 @@ describe("tokens stay out of the report", () => {
   const header = (value: string) => ({ sendHeaders: true, headerParameters: { parameters: [{ name: "Authorization", value }] } });
 
   it("RG105 names where the token comes from without printing the expression", () => {
-    const r = report(httpWithAuth(header("=Bearer {{ $('Get token').item.json.access_token }}")), onlyA);
+    const b = httpWithAuth(header("=Bearer {{ $('Get token').item.json.access_token }}"));
+    const r = report(b.node({ name: "Get token", type: T.http, parameters: { url: "https://vault.example.com/token" } }).chain("Get token", "Post"), onlyA);
     const f = r.findings.find((x) => x.ruleId === "RG105");
     expect(f?.detail).toContain('"Get token"');
     expect(f?.detail).not.toMatch(/access_token|\{\{/);
@@ -503,5 +504,129 @@ describe("performance with disabled nodes and many approvals", () => {
     const r = report(b, onlyA);
     expect(performance.now() - t0).toBeLessThan(1000);
     expect(r.findings.find((f) => f.ruleId === "RG401")?.severity).toBe("high");
+  });
+});
+
+// Third round: CodeRabbit's re-review of the fixes, plus error routing found while checking
+// the Switch source.
+describe("approval checks, round two", () => {
+  const ifOn = (conditions: unknown[], extra: Record<string, unknown> = {}) => ({ name: "Check", type: "n8n-nodes-base.if", typeVersion: 2.2, parameters: { conditions: { conditions } }, ...extra });
+  const after = (decision: { name: string; type: string; typeVersion: number; parameters: Record<string, unknown> }, output: number, raw: Record<string, unknown> = {}) => {
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Approve", type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+      .node({ name: "Policy", type: T.set })
+      .node(decision)
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .chain("Daily", "Policy", "Approve", decision.name)
+      .connect(decision.name, "Create A", "main", output);
+    const json = b.json() as { nodes: Record<string, unknown>[] };
+    Object.assign(json.nodes.find((n) => n.name === decision.name) ?? {}, raw);
+    const r = scanText(JSON.stringify(json), onlyA);
+    if (!r.ok) throw new Error("parse failed");
+    return r.report;
+  };
+  const cond = (leftValue: string, operation: string, rightValue?: unknown) => ({ leftValue, rightValue, operator: { type: "boolean", operation } });
+
+  it("RG403: checking that the answer exists isn't checking that it's yes", () => {
+    expect(ids(after(ifOn([cond("={{ $json.data.approved }}", "exists")]), 0))).toContain("RG403");
+  });
+
+  it("RG403: an IF on another node's approved field doesn't check the person's answer", () => {
+    expect(ids(after(ifOn([cond("={{ $('Policy').item.json.approved }}", "true")]), 0))).toContain("RG403");
+  });
+
+  it("RG403: the word approved as a literal value isn't the answer either", () => {
+    const status = { leftValue: "={{ $json.status }}", rightValue: "approved", operator: { type: "string", operation: "equals" } };
+    expect(ids(after(ifOn([status]), 0))).toContain("RG403");
+  });
+
+  it("still passes a check that names the approval node", () => {
+    expect(after(ifOn([cond("={{ $('Approve').item.json.data.approved }}", "true")]), 0).verdict).toBe("clear");
+  });
+
+  it("RG403: an IF set to continue on error sends failed items down the false branch", () => {
+    const declined = ifOn([cond("={{ $json.data.approved }}", "false")]);
+    expect(after(declined, 1).verdict).toBe("clear");
+    expect(ids(after(declined, 1, { onError: "continueRegularOutput" }))).toContain("RG403");
+  });
+
+  it("Switch v2 routes each rule to its position, v1 to its output field", () => {
+    const rules = (v: number) => ({
+      name: "Route",
+      type: "n8n-nodes-base.switch",
+      typeVersion: v,
+      parameters: { dataType: "boolean", value1: "={{ $json.data.approved }}", rules: { rules: [{ value2: false }, { value2: true, ...(v === 1 ? { output: 2 } : {}) }] } },
+    });
+    expect(after(rules(2), 1).verdict).toBe("clear");
+    expect(ids(after(rules(2), 0))).toContain("RG403");
+    expect(after(rules(1), 2).verdict).toBe("clear");
+  });
+
+  it("RG403: a Switch whose fallback or errors land on the yes output", () => {
+    const yes = { conditions: { conditions: [cond("={{ $json.data.approved }}", "true")], combinator: "and" } };
+    const sw = (options: Record<string, unknown>) => ({ name: "Route", type: "n8n-nodes-base.switch", typeVersion: 3.2, parameters: { rules: { values: [yes] }, options } });
+    expect(after(sw({}), 0).verdict).toBe("clear");
+    expect(ids(after(sw({ fallbackOutput: 0 }), 0))).toContain("RG403");
+    expect(ids(after(sw({}), 0, { onError: "continueRegularOutput" }))).toContain("RG403");
+  });
+});
+
+describe("graph and parsing, round two", () => {
+  it("RG401: a write fed only by a disabled node is its own entry point", () => {
+    const b = wf()
+      .node({ name: "Old trigger", type: T.set, disabled: true })
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .connect("Old trigger", "Create A");
+    expect(report(b, onlyA).findings.find((f) => f.ruleId === "RG401")?.severity).toBe("medium");
+  });
+
+  it("treats a POST as a write when the URL expression can return a path it can't read", () => {
+    const url = '={{ $json.lookup ? "https://quickbooks.api.intuit.com/v3/company/111/query" : $json.url }}';
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Call", type: T.http, typeVersion: 4.2, parameters: { method: "POST", url }, credentials: credA })
+      .chain("Daily", "Call");
+    const r = report(b, onlyA);
+    expect(r.touchpoints[0]?.write).toBe(true);
+    expect(ids(r)).toContain("RG401");
+  });
+
+  it("an HTTP Request node doesn't read the AI tool's header field", () => {
+    const b = wf().node({
+      name: "Get",
+      type: T.http,
+      typeVersion: 4.2,
+      parameters: { method: "GET", url: "https://quickbooks.api.intuit.com/v3/company/111/invoice/1", sendHeaders: true, parametersHeaders: { values: [{ name: "Authorization", value: "=Bearer {{ $json.token }}" }] } },
+      credentials: credA,
+    });
+    expect(report(b, both).touchpoints[0]?.auth).toBe("credential");
+  });
+
+  it("RG105 quotes only real node names", () => {
+    const b = wf().node({
+      name: "Post",
+      type: T.http,
+      typeVersion: 4.2,
+      parameters: {
+        method: "POST",
+        url: "=https://quickbooks.api.intuit.com/v3/company/{{ $('sk_live_abcdef123456').item.json.realm }}/bill",
+        sendHeaders: true,
+        headerParameters: { parameters: [{ name: "Authorization", value: "={{ 'Bearer ' + $('sk_live_abcdef123456').item.json.t }}" }] },
+      },
+    });
+    const r = report(b, onlyA);
+    expect(ids(r)).toContain("RG105");
+    expect(JSON.stringify(r.findings)).not.toContain("sk_live");
+  });
+
+  it("resolves a credential name given only on a disabled node", () => {
+    const m = manifestYaml([A, { id: "b", credentials: ["QBO B"], realmIds: ["222"] }], ["a"]);
+    const b = wf()
+      .node({ name: "Read", type: T.qbo, parameters: read, credentials: { quickBooksOAuth2Api: { id: "cb" } } })
+      .node({ name: "Old read", type: T.qbo, parameters: read, credentials: { quickBooksOAuth2Api: { id: "cb", name: "QBO B" } }, disabled: true });
+    const r = report(b, m);
+    expect(ids(r)).toContain("RG102");
+    expect(ids(r)).not.toContain("RG101");
   });
 });

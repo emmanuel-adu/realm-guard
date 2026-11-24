@@ -68,9 +68,13 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
   // A company ID written inside {{ }} is code, not the URL: `{{ a ? ".../111/..." : ".../222/..." }}`
   // picks the company at run time even though each branch spells out a number.
   if (raw.startsWith("=") && insideExpression(url, at)) {
-    const paths = [...url.matchAll(/\/v3\/company\/[^/?#"'`]*\/?([a-z0-9]*)/gi)].map((m) => (m[1] ?? "").toLowerCase());
-    if (new Set(paths).size === 1) return { realm: { kind: "expression", expr: url }, path: paths[0] ?? "" };
-    return { realm: { kind: "expression", expr: url }, path: "", pathIsExpression: true };
+    // Only an expression that is one template literal spells out the whole URL. A ternary or a
+    // variable can return a path that isn't in the text, so the path stays unknown and a POST
+    // counts as a write.
+    const template = /^\s*\{\{\s*`([^`]*)`\s*\}\}\s*$/.exec(url)?.[1];
+    const paths = template === undefined ? [] : [...template.matchAll(/\/v3\/company\/[^/?#]*\/([a-z0-9]*)/gi)].map((m) => (m[1] ?? "").toLowerCase());
+    const realm: RealmSource = { kind: "expression", expr: url };
+    return paths.length === 1 && paths[0] ? { realm, path: paths[0] } : { realm, path: "", pathIsExpression: true };
   }
   const rest = url.slice(at + marker.length);
   let segment: string;
@@ -82,13 +86,14 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
   }
   const after = rest.slice(segment.length).replace(/^\//, "");
   const path = (/^[a-z0-9]*/i.exec(after)?.[0] ?? "").toLowerCase();
+  const pathIsExpression = path === "" && /^[{$]/.test(after);
   let realm: RealmSource;
   // {{ }} expressions, ${} inside a template literal, and {name} placeholders that an agent
   // fills in on the HTTP Request tool all make the company ID dynamic.
   if (/[{$]/.test(segment)) realm = { kind: "expression", expr: segment };
   else if (/^\d+$/.test(segment)) realm = { kind: "literal", id: segment };
   else realm = { kind: "unknown" };
-  return { realm, path };
+  return pathIsExpression ? { realm, path, pathIsExpression } : { realm, path };
 }
 
 function insideExpression(url: string, at: number): boolean {
@@ -138,7 +143,8 @@ function activeHeaderSources(node: WorkflowNode): HeaderSource[] {
   if (node.type === "n8n-nodes-base.httpRequest" && node.typeVersion < 3 && !("sendHeaders" in p)) return [p.jsonParameters === true ? "legacy-json" : "legacy-list"];
   if (p.sendHeaders !== true) return [];
   if (p.specifyHeaders === "json") return ["json"];
-  return ["keypair", "tool-list"];
+  // The AI HTTP tool keeps its list in its own field; HTTP Request (and its tool form) doesn't read it.
+  return [node.type === "@n8n/n8n-nodes-langchain.toolHttpRequest" ? "tool-list" : "keypair"];
 }
 
 // A bearer token typed in, even inside an expression (`{{ "Bearer sk_live_..." }}`). Stops at

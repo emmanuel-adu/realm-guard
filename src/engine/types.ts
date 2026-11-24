@@ -15,6 +15,8 @@ export interface WorkflowNode {
   /** Keyed by n8n credential type, e.g. `quickBooksOAuth2Api`. */
   credentials: Record<string, CredentialRef>;
   disabled: boolean;
+  /** "On error: continue" sends failed items down a regular output (IF: false, Switch: first). */
+  errorsContinue: boolean;
 }
 
 export interface Edge {

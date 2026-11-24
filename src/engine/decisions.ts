@@ -1,3 +1,4 @@
+import { isExpression, referencedNodes, usesIncomingItem } from "./expressions";
 import type { WorkflowNode } from "./types";
 
 // An approval step only protects a write when a later IF, Filter or Switch looks at the
@@ -58,15 +59,26 @@ function formFieldKeys(p: Obj): string[] {
 // Used when the answer's shape can't be read from the export (a webhook resume, gotoHuman).
 const GENERIC_ANSWER = /approv|reject|declin|deny|denied|decision/i;
 
-function readsAnswer(keys: string[]): (s: string) => boolean {
-  if (keys.length === 0) return (s) => GENERIC_ANSWER.test(s);
+/**
+ * True for an expression that reads this gate's answer: it names an answer field, and it reads
+ * either the gate by name or the incoming item without naming another node. `$('Policy')
+ * .item.json.approved` is some other step's flag, and a literal "approved" is just a value.
+ */
+function readsAnswer(keys: string[], gate: string): (s: string) => boolean {
   const tests = keys.map((k) => (/^\w+$/.test(k) ? (s: string) => new RegExp(`\\b${k}\\b`).test(s) : (s: string) => s.includes(k)));
-  return (s) => tests.some((t) => t(s));
+  const namesField = keys.length === 0 ? (s: string) => GENERIC_ANSWER.test(s) : (s: string) => tests.some((t) => t(s));
+  return (s) => {
+    if (!isExpression(s) || !namesField(s)) return false;
+    const refs = referencedNodes(s);
+    return refs.includes(gate) || (refs.length === 0 && usesIncomingItem(s));
+  };
 }
 
 const POSITIVE = new Set(["true", "equals", "equal", "exists", "contains", "startsWith", "endsWith", "regex", "notEmpty", "isNotEmpty"]);
 const NEGATIVE = new Set(["false", "notEquals", "notEqual", "notExists", "notContains", "notStartsWith", "notEndsWith", "notRegex", "empty", "isEmpty"]);
-const UNARY = new Set(["true", "false", "exists", "notExists", "empty", "notEmpty", "isEmpty", "isNotEmpty"]);
+// Only "is true" and "is false" say which way the answer went. "Exists" and "is empty" hold for
+// a no as well as a yes.
+const PRESENCE = new Set(["exists", "notExists", "empty", "notEmpty", "isEmpty", "isNotEmpty"]);
 
 function valuePolarity(v: unknown): 1 | -1 | 0 {
   if (typeof v === "boolean") return v ? 1 : -1;
@@ -86,9 +98,9 @@ function polarity(c: Condition, reads: (s: string) => boolean): Polarity | undef
   const rightReads = typeof c.right === "string" && reads(c.right);
   if (!leftReads && !rightReads) return undefined;
   const sign = POSITIVE.has(c.op) ? 1 : NEGATIVE.has(c.op) ? -1 : 0;
-  if (sign === 0) return "unknown";
+  if (sign === 0 || PRESENCE.has(c.op)) return "unknown";
   const value = leftReads ? c.right : c.left;
-  let vp = UNARY.has(c.op) ? 1 : valuePolarity(value);
+  let vp = c.op === "true" || c.op === "false" ? 1 : valuePolarity(value);
   // "Decision equals Send it" reads as choosing that option; a negated unknown value doesn't.
   if (vp === 0) vp = sign === 1 && typeof value === "string" && value.trim() !== "" ? 1 : 0;
   if (vp === 0) return "unknown";
@@ -140,19 +152,33 @@ function readGroup(conditions: unknown, combineOperation: unknown): Group | unde
 }
 
 /**
- * For a decision node, the outputs that carry only items the person approved, given where the
- * approval step puts its answer. Undefined when the node doesn't look at the answer, so it
- * protects none of its branches.
+ * For a decision node, the outputs that carry only items the person approved, given the
+ * approval step and where it puts its answer. Undefined when the node doesn't look at that
+ * answer, so it protects none of its branches.
  */
-export function approvedOutputs(decision: WorkflowNode, keys: string[]): Set<number> | undefined {
-  const reads = readsAnswer(keys);
+export function approvedOutputs(decision: WorkflowNode, keys: string[], gate: string): Set<number> | undefined {
+  const reads = readsAnswer(keys, gate);
   const p = decision.parameters;
   if (decision.type === "n8n-nodes-base.if" || decision.type === "n8n-nodes-base.filter") {
     const g = readGroup(p.conditions, p.combineOperation);
-    return g ? groupApproved(g, reads) : undefined;
+    const out = g ? groupApproved(g, reads) : undefined;
+    // With "continue on error", items whose check failed come out of the false output.
+    if (out && decision.errorsContinue) out.delete(1);
+    return out;
   }
   if (decision.type !== "n8n-nodes-base.switch") return undefined;
+  const out = switchApproved(decision, reads);
+  if (!out) return undefined;
+  // Unmatched items go to a numbered fallback output, and failed ones to the first output.
+  const options = isObj(p.options) ? p.options : {};
+  const fallback = decision.typeVersion >= 3 ? options.fallbackOutput : p.fallbackOutput;
+  if (typeof fallback === "number") out.delete(fallback);
+  if (decision.errorsContinue) out.delete(0);
+  return out;
+}
 
+function switchApproved(decision: WorkflowNode, reads: (s: string) => boolean): Set<number> | undefined {
+  const p = decision.parameters;
   if (p.mode === "expression") {
     // The output number is computed, so no branch can be trusted to mean yes.
     const expr = str(p.output);
@@ -170,11 +196,13 @@ export function approvedOutputs(decision: WorkflowNode, keys: string[]): Set<num
       if (approved?.has(0)) out.add(i);
     });
   } else if (Array.isArray(rules.rules)) {
-    // Versions 1 and 2: one value compared against each rule, which names its output.
+    // Versions 1 and 2 compare one value against each rule. Version 1 sends a match to the
+    // rule's output field; version 2 ignores that field and uses the rule's position.
     const d = V1_DEFAULTS[str(p.dataType) ?? "number"] ?? { op: "equal", value: "" };
     const approvedBy = new Map<number, boolean>();
-    for (const rule of rules.rules.filter(isObj)) {
-      const output = typeof rule.output === "number" ? rule.output : 0;
+    for (const [i, rule] of rules.rules.entries()) {
+      if (!isObj(rule)) continue;
+      const output = decision.typeVersion >= 2 ? i : typeof rule.output === "number" ? rule.output : 0;
       const pol = polarity({ left: p.value1, right: "value2" in rule ? rule.value2 : d.value, op: str(rule.operation) ?? d.op }, reads);
       if (pol !== undefined) seen = true;
       // Several rules can share an output; it means yes only if every one of them does.

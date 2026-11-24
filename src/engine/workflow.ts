@@ -42,6 +42,7 @@ function normalizeNode(raw: unknown, index: number): WorkflowNode | string {
     parameters: isObj(raw.parameters) ? raw.parameters : {},
     credentials,
     disabled: raw.disabled === true,
+    errorsContinue: raw.onError === "continueRegularOutput" || (raw.onError === undefined && raw.continueOnFail === true),
   };
 }
 

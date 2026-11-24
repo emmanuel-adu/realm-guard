@@ -84,7 +84,7 @@ export function RichText({ text }: { text: string }) {
     <>
       {parts.map((part, i) =>
         i % 2 === 1 ? (
-          <code key={i} className="rounded border border-rule bg-wash px-1 py-px font-mono text-[12.5px] break-words text-ink">
+          <code key={i} className="box-decoration-clone rounded border border-rule bg-wash px-1 py-px font-mono text-[12.5px] break-words text-ink">
             {part}
           </code>
         ) : (
