@@ -15,7 +15,7 @@ import sys
 from playwright.sync_api import Page, expect, sync_playwright
 
 CHROME = "/usr/bin/google-chrome"
-VIEWPORTS = {"desktop": (1440, 900), "phone": (390, 844)}
+VIEWPORTS = {"desktop": (1440, 900), "laptop": (1024, 768), "phone": (390, 844)}
 SHOTS = "e2e/screenshots"
 SAMPLES = "src/samples"
 
@@ -53,6 +53,8 @@ def journey(page: Page, shot, full, label: str) -> list[tuple[str, bool, str]]:
     # Empty state.
     add("one h1", page.locator("h1").count() == 1)
     add("empty state explains the four checks", page.get_by_role("heading", name="What Realm Guard checks").is_visible())
+    label_h = page.get_by_text("No workflow handy?").bounding_box()["height"]
+    add("sample prompt stays on one line", label_h < 30, f"{label_h:.0f}px tall")
     shot("empty")
 
     # Upload a workflow file with no manifest.

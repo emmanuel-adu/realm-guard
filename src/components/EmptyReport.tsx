@@ -22,7 +22,7 @@ export function EmptyReport({ samples, onSample }: { samples: Sample[]; onSample
         ))}
       </ol>
       <div className="mt-5 flex flex-col gap-2.5 sm:flex-row sm:items-center">
-        <p className="text-[14px] text-muted">No workflow handy?</p>
+        <p className="shrink-0 text-[14px] text-muted">No workflow handy?</p>
         <div className="flex flex-wrap gap-2">
           {samples.map((s, i) => (
             <Button key={s.id} variant={i === 0 ? "primary" : "secondary"} onClick={() => {
