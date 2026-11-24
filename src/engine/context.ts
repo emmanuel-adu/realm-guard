@@ -111,6 +111,8 @@ export interface Context {
   multiClient: boolean;
   touchpoints: Resolved[];
   byNode: Map<string, Resolved>;
+  /** Names of credentials whose id appears under more than one name in the file. */
+  credentialNameConflicts: string[][];
 }
 
 export function buildContext(workflow: Workflow, manifest: Manifest | undefined): Context {
@@ -123,12 +125,21 @@ export function buildContext(workflow: Workflow, manifest: Manifest | undefined)
   // since a credential's name doesn't depend on where it's used), so a reference without the
   // name gets the same owner and label as one with it, whichever comes first.
   const nameById = new Map<string, string>();
+  const namesById = new Map<string, Map<string, string>>();
   for (const node of workflow.nodes) {
     for (const c of Object.values(node.credentials)) {
       tenancy.alias(c);
-      if (c.id && c.name && !nameById.has(c.id)) nameById.set(c.id, c.name);
+      if (!c.id || !c.name) continue;
+      if (!nameById.has(c.id)) nameById.set(c.id, c.name);
+      const names = namesById.get(c.id) ?? new Map<string, string>();
+      if (!names.has(c.name.trim().toLowerCase())) names.set(c.name.trim().toLowerCase(), c.name);
+      namesById.set(c.id, names);
     }
   }
+  // One id under two names means the nodes were saved at different times, and the manifest
+  // can't tell which name is current. That's a gap, not something to guess.
+  const usedIds = new Set(raw.flatMap((tp) => credOf(tp)?.id ?? []));
+  const credentialNameConflicts = [...namesById].filter(([id, names]) => usedIds.has(id) && names.size > 1).map(([, names]) => [...names.values()]);
   for (const tp of raw) {
     const c = credOf(tp);
     const name = c?.id ? nameById.get(c.id) : undefined;
@@ -172,5 +183,6 @@ export function buildContext(workflow: Workflow, manifest: Manifest | undefined)
     multiClient,
     touchpoints,
     byNode: new Map(touchpoints.map((t) => [t.node.name, t])),
+    credentialNameConflicts,
   };
 }

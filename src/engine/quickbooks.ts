@@ -71,8 +71,9 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
     // Only an expression that is one template literal spells out the whole URL. A ternary or a
     // variable can return a path that isn't in the text, so the path stays unknown and a POST
     // counts as a write.
-    const template = /^\s*\{\{\s*`([^`]*)`\s*\}\}\s*$/.exec(url)?.[1];
-    const paths = template === undefined ? [] : [...template.matchAll(/\/v3\/company\/[^/?#]*\/([a-z0-9]*)/gi)].map((m) => (m[1] ?? "").toLowerCase());
+    // Interpolations are blanked first, so a path inside `${a || "111/query"}` never counts.
+    const template = /^\s*\{\{\s*`([^`]*)`\s*\}\}\s*$/.exec(url)?.[1]?.replace(/\$\{[^}]*\}/g, "\u0000");
+    const paths = template === undefined ? [] : [...template.matchAll(/\/v3\/company\/[^/?#]*\/([a-z0-9]+)(?=$|[/?#])/gi)].map((m) => (m[1] ?? "").toLowerCase());
     const realm: RealmSource = { kind: "expression", expr: url };
     return paths.length === 1 && paths[0] ? { realm, path: paths[0] } : { realm, path: "", pathIsExpression: true };
   }
@@ -85,8 +86,10 @@ export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSourc
     segment = /^[^/?#]*/.exec(rest)?.[0] ?? "";
   }
   const after = rest.slice(segment.length).replace(/^\//, "");
-  const path = (/^[a-z0-9]*/i.exec(after)?.[0] ?? "").toLowerCase();
-  const pathIsExpression = path === "" && /^[{$]/.test(after);
+  const word = (/^[a-z0-9]*/i.exec(after)?.[0] ?? "").toLowerCase();
+  // `/{{ $json.entity }}` or `/query{{ $json.suffix }}` leaves the path to run time.
+  const pathIsExpression = /^[{$]/.test(after.slice(word.length));
+  const path = pathIsExpression ? "" : word;
   let realm: RealmSource;
   // {{ }} expressions, ${} inside a template literal, and {name} placeholders that an agent
   // fills in on the HTTP Request tool all make the company ID dynamic.
@@ -104,16 +107,24 @@ function insideExpression(url: string, at: number): boolean {
 interface Header {
   name: string;
   value: string;
+  /** The AI HTTP tool lets the model supply a header, or a {placeholder} in it. */
+  fromModel?: boolean;
 }
+
+const TOOL_HTTP = "@n8n/n8n-nodes-langchain.toolHttpRequest";
+const PLACEHOLDER = /\{[^{}$]+\}/;
 
 type HeaderSource = "keypair" | "legacy-list" | "tool-list" | "json" | "legacy-json";
 
-function headerList(p: Record<string, unknown>, source: HeaderSource): Header[] {
+function headerList(node: WorkflowNode, source: HeaderSource): Header[] {
+  const p = node.parameters;
+  const tool = node.type === TOOL_HTTP;
   if (source === "json" || source === "legacy-json") {
     const raw = str(p[source === "json" ? "jsonHeaders" : "headerParametersJson"]);
     const m = raw ? /"authorization"\s*:\s*"([^"]*)"/i.exec(raw) : null;
     if (!raw || m?.[1] === undefined) return [];
-    return [{ name: "Authorization", value: raw.startsWith("=") ? `=${m[1]}` : m[1] }];
+    const value = raw.startsWith("=") ? `=${m[1]}` : m[1];
+    return [tool && PLACEHOLDER.test(m[1]) ? { name: "Authorization", value, fromModel: true } : { name: "Authorization", value }];
   }
   const list =
     source === "keypair"
@@ -126,7 +137,13 @@ function headerList(p: Record<string, unknown>, source: HeaderSource): Header[] 
   for (const h of list as Record<string, unknown>[]) {
     const name = str(h.name);
     const value = str(h.value);
-    if (name && value !== undefined) out.push({ name, value });
+    if (!name) continue;
+    if (source === "tool-list") {
+      // n8n 2.48 defaults the provider to modelRequired, and only reads `value` for fieldValue.
+      const provider = str(h.valueProvider) ?? "modelRequired";
+      const fromModel = provider.includes("model") || PLACEHOLDER.test(value ?? "");
+      out.push(fromModel ? { name, value: value ?? "", fromModel } : { name, value: value ?? "" });
+    } else if (value !== undefined) out.push({ name, value });
   }
   return out;
 }
@@ -144,20 +161,24 @@ function activeHeaderSources(node: WorkflowNode): HeaderSource[] {
   if (p.sendHeaders !== true) return [];
   if (p.specifyHeaders === "json") return ["json"];
   // The AI HTTP tool keeps its list in its own field; HTTP Request (and its tool form) doesn't read it.
-  return [node.type === "@n8n/n8n-nodes-langchain.toolHttpRequest" ? "tool-list" : "keypair"];
+  return [node.type === TOOL_HTTP ? "tool-list" : "keypair"];
 }
 
 // A bearer token typed in, even inside an expression (`{{ "Bearer sk_live_..." }}`). Stops at
 // `{`, `$`, quotes and `+`, so `Bearer {{ $json.token }}` and `"Bearer " + token` don't count.
+// Adjacent string literals are joined first: `"Bearer " + "sk_live_..."` is one pasted token.
 const LITERAL_BEARER = /bearer\s+[\w.~/=-]{10,}/i;
+const hasLiteralBearer = (value: string) => LITERAL_BEARER.test(value.replace(/(['"`])\s*\+\s*(['"`])/g, ""));
 
 const authHeader = (headers: Header[]) => headers.find((h) => h.name.toLowerCase() === "authorization");
 
 function httpAuth(node: WorkflowNode): AuthSource {
   const p = node.parameters;
-  const auth = authHeader(activeHeaderSources(node).flatMap((src) => headerList(p, src)));
+  const auth = authHeader(activeHeaderSources(node).flatMap((src) => headerList(node, src)));
   if (auth) {
-    if (LITERAL_BEARER.test(auth.value)) return { kind: "pasted-token" };
+    // Stands in for the model's argument so the report can say where the token comes from.
+    if (auth.fromModel) return { kind: "dynamic-token", expr: "={{ $fromAI('Authorization') }}" };
+    if (hasLiteralBearer(auth.value)) return { kind: "pasted-token" };
     if (isExpression(auth.value)) return { kind: "dynamic-token", expr: auth.value };
   }
   let credentialType: string | undefined;
@@ -192,7 +213,7 @@ function httpTouchpoint(node: WorkflowNode): RawTouchpoint | undefined {
     realm: parsed.realm,
     auth,
   };
-  if (auth.kind !== "pasted-token" && ALL_SOURCES.some((src) => LITERAL_BEARER.test(authHeader(headerList(node.parameters, src))?.value ?? ""))) tp.unusedPastedToken = true;
+  if (auth.kind !== "pasted-token" && ALL_SOURCES.some((src) => hasLiteralBearer(authHeader(headerList(node, src))?.value ?? ""))) tp.unusedPastedToken = true;
   return tp;
 }
 

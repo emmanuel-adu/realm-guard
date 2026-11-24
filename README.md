@@ -88,7 +88,7 @@ The verdict is **Fix before running** if anything is critical or high, **Not ver
 - Sub-workflows are listed, not opened. Scan each one on its own. Community nodes are listed too, and Code, community and MCP nodes that mention QuickBooks are flagged for a manual check.
 - Vector stores aren't checked for per-client namespaces yet.
 - When a company ID or token comes from an expression, it can only tell you where it comes from, not whether the lookup is right.
-- It reads approval checks that compare the answer with true or false, yes or no, approve or reject, or a form option. A check it can't read counts as no check, so RG403 can fire on a check that's fine.
+- It reads approval checks that compare a plain reference to the answer (`{{ $json.data.approved }}`, not `{{ !$json.data.approved }}`) with true or false, yes or no, approve or reject, or a form option. A check it can't read counts as no check, so RG403 can fire on a check that's fine.
 
 I checked every node type and default against the published n8n packages (`n8n-nodes-base` 2.48.5 and `@n8n/n8n-nodes-langchain` 2.48.6), and ran the engine over 2,066 public workflow exports without a crash.
 

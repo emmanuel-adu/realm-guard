@@ -155,7 +155,7 @@ export function credentialRules(ctx: Context): Finding[] {
         detail:
           tp.auth.kind === "pasted-token"
             ? "The Authorization header holds a literal bearer token."
-            : "A header list the node no longer uses still holds a literal bearer token. It isn't sent, but it ships with every copy of the file.",
+            : "A header value the node doesn't send still holds a literal bearer token. It isn't sent, but it ships with every copy of the file.",
         why: "The token travels with every copy and export of this workflow, so anyone holding the file can call that client's QuickBooks.",
         fix: "Revoke the token in the Intuit developer portal, then use a stored QuickBooks credential instead.",
       });
@@ -426,10 +426,11 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
   // as approved only past an IF, Filter or Switch that reads the answer, on a branch that
   // means yes. A check on anything else (the amount, the vendor) protects nothing.
   const undecided = new Map<string, { gate: string; decision?: string }>();
+  // Every gate a run can reach, including ones behind an earlier approval: a second approval
+  // whose answer nothing checks stops nothing either.
+  const runnable = graph.reach(entries.keys());
   for (const [gate, kind] of kinds) {
-    if (kind !== "needs-check") continue;
-    const reached = entries.has(gate) || graph.mainParents(gate).some((p) => openAll.has(p));
-    if (!reached) continue;
+    if (kind !== "needs-check" || !runnable.has(gate)) continue;
     const gateNode = graph.node(gate);
     if (!gateNode) continue;
     // Whether an IF checks this gate depends on the gate (`$('Approve')`), so read only the

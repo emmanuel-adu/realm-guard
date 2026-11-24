@@ -630,3 +630,82 @@ describe("graph and parsing, round two", () => {
     expect(ids(r)).not.toContain("RG101");
   });
 });
+
+// Round three: CodeRabbit's follow-ups in the threads and on the round-two commit.
+describe("round three", () => {
+  const approvalThen = (b: WorkflowBuilder, decision: Record<string, unknown>, output: number) =>
+    b
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Approve", type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+      .node({ name: "Check", type: "n8n-nodes-base.if", typeVersion: 2.2, parameters: decision })
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .chain("Daily", "Approve", "Check")
+      .connect("Check", "Create A", "main", output);
+
+  it("RG403: a negated answer inside the expression doesn't sign as yes", () => {
+    const negated = { conditions: { conditions: [{ leftValue: "={{ !$json.data.approved }}", operator: { type: "boolean", operation: "true" } }] } };
+    expect(ids(report(approvalThen(wf(), negated, 0), onlyA))).toContain("RG403");
+  });
+
+  it("RG403: a second approval after an earlier yes is checked on its own", () => {
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Approve A", type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+      .node({ name: "A approved?", type: "n8n-nodes-base.if", typeVersion: 2.2, parameters: approvedCheck })
+      .node({ name: "Approve B", type: T.slack, typeVersion: 2.3, parameters: slackApproval })
+      .node({ name: "Create A", type: T.qbo, parameters: create, credentials: credA })
+      .chain("Daily", "Approve A", "A approved?", "Approve B", "Create A");
+    expect(report(b, onlyA).findings.find((f) => f.ruleId === "RG403")?.nodes).toEqual(["Create A", "Approve B"]);
+  });
+
+  it("treats a POST as a write when the template's path sits inside interpolation code", () => {
+    const url = '={{ `https://quickbooks.api.intuit.com/v3/company/${$json.endpoint || "111/query"}` }}';
+    const b = wf().node({ name: "Call", type: T.http, typeVersion: 4.2, parameters: { method: "POST", url }, credentials: credA });
+    expect(report(b, onlyA).touchpoints[0]?.write).toBe(true);
+  });
+
+  it("RG106: a bearer token split across string literals is still pasted", () => {
+    const b = wf().node({
+      name: "Post",
+      type: T.http,
+      typeVersion: 4.2,
+      parameters: { method: "POST", url: "https://quickbooks.api.intuit.com/v3/company/111/bill", sendHeaders: true, headerParameters: { parameters: [{ name: "Authorization", value: '={{ "Bearer " + "sk_live_abcdef123456" }}' }] } },
+    });
+    const r = report(b, onlyA);
+    expect(ids(r)).toContain("RG106");
+    expect(ids(r)).not.toContain("RG105");
+  });
+
+  it("the AI HTTP tool's header is filled by the model unless it's set to a fixed value", () => {
+    const tool = (header: Record<string, unknown>) =>
+      wf()
+        .node({ name: "Agent", type: T.agent })
+        .node({
+          name: "Query",
+          type: "@n8n/n8n-nodes-langchain.toolHttpRequest",
+          typeVersion: 1.1,
+          parameters: { method: "GET", url: "https://quickbooks.api.intuit.com/v3/company/111/query", sendHeaders: true, parametersHeaders: { values: [{ name: "Authorization", ...header }] } },
+          credentials: credA,
+        })
+        .connect("Query", "Agent", "ai_tool");
+    const byModel = report(tool({ value: "Bearer abcdefghijklmnop" }), both);
+    expect(byModel.touchpoints[0]?.auth).toBe("dynamic-token");
+    expect(byModel.findings.find((f) => f.ruleId === "RG105")?.detail).toContain("the AI model");
+    expect(ids(byModel)).toContain("RG106");
+    const placeholder = report(tool({ valueProvider: "fieldValue", value: "Bearer {token}" }), both);
+    expect(placeholder.findings.find((f) => f.ruleId === "RG105")?.detail).toContain("the AI model");
+    const fixed = report(tool({ valueProvider: "fieldValue", value: "Bearer abcdefghijklmnop" }), both);
+    expect(fixed.touchpoints[0]?.auth).toBe("pasted-token");
+  });
+
+  it("a credential id that goes by two names is a gap, not a guess", () => {
+    const b = wf()
+      .node({ name: "Daily", type: T.schedule })
+      .node({ name: "Read", type: T.qbo, parameters: read, credentials: qboCred("ca", "QBO A") })
+      .node({ name: "Read again", type: T.qbo, parameters: read, credentials: qboCred("ca", "QBO Zed") })
+      .chain("Daily", "Read", "Read again");
+    const r = report(b, onlyA);
+    expect(r.verdict).toBe("not-verified");
+    expect(r.coverage.gaps.join(" ")).toMatch(/QBO A.*QBO Zed/);
+  });
+});

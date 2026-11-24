@@ -24,6 +24,9 @@ export function scan(workflow: Workflow, manifest?: Manifest): Report {
   if (!manifest && ctx.touchpoints.length > 0) {
     gaps.push("No client manifest, so credentials and company IDs weren't checked against your client list.");
   }
+  for (const names of ctx.credentialNameConflicts) {
+    gaps.push(`One credential appears as ${names.map((n) => `"${n}"`).join(" and ")}, so its client can't be confirmed. Export the workflow again so every node shows the credential's current name.`);
+  }
   const noCredential = findings.find((f) => f.ruleId === "RG103");
   if (noCredential) gaps.push(`${noCredential.nodes.join(", ")}: no credential in the export, so the client is unknown.`);
   for (const tp of ctx.touchpoints) {

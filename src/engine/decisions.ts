@@ -92,11 +92,19 @@ function valuePolarity(v: unknown): 1 | -1 | 0 {
   return 0;
 }
 
+// A bare property read such as `={{ $json.data.approved }}` or `={{ $('Approve').item.json["Decision"] }}`.
+// Anything more (`!x`, `x == false`, a ternary, a function call) can flip the meaning, so a
+// condition built on it reads the answer but isn't signed.
+const PLAIN_READ =
+  /^=\s*\{\{\s*\$(?:json|input\.(?:item|first\(\)|last\(\))\.json|\(\s*(['"`])[^'"`]+\1\s*\)\.(?:item|first\(\)|last\(\))\.json|node\[\s*(['"`])[^'"`]+\2\s*\]\.json)(?:\.[A-Za-z_$][\w$]*|\[\s*(['"`])[^'"`]*\3\s*\]|\[\d+\])*\s*\}\}\s*$/;
+
 /** Undefined when the condition doesn't look at the answer at all. */
 function polarity(c: Condition, reads: (s: string) => boolean): Polarity | undefined {
   const leftReads = typeof c.left === "string" && reads(c.left);
   const rightReads = typeof c.right === "string" && reads(c.right);
   if (!leftReads && !rightReads) return undefined;
+  const side = leftReads ? c.left : c.right;
+  if (typeof side !== "string" || !PLAIN_READ.test(side.trim())) return "unknown";
   const sign = POSITIVE.has(c.op) ? 1 : NEGATIVE.has(c.op) ? -1 : 0;
   if (sign === 0 || PRESENCE.has(c.op)) return "unknown";
   const value = leftReads ? c.right : c.left;
