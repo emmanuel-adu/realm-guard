@@ -30,7 +30,7 @@ flowchart TD
       G["<b>Workflow graph</b><br/>data flow, IF branches,<br/>agent tools"] ~~~ S["<b>QuickBooks steps</b><br/>company ID, auth source,<br/>read or write"] ~~~ C["<b>Client map</b><br/>credential or company ID<br/>to client"]
     end
 
-    model --> GAP["<b>Coverage gaps</b><br/>anything it couldn't read"]
+    model --> GAP["<b>Coverage gaps</b><br/>parts of a step it couldn't read"]
     model --> R["<b>18 rules</b><br/>credentials, company IDs,<br/>cross-client data, approvals"]
     GAP --> V(["<b>Verdict</b>"])
     R --> V
