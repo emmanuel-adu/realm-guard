@@ -361,16 +361,18 @@ describe("approvals", () => {
     expect(find(r, "RG401").severity).toBe("medium");
   });
 
-  it("RG401: passes when every path waits for a person in Slack", () => {
+  it("RG401: passes when every path waits for a person in Slack and checks the answer", () => {
     const r = run(
       wf()
         .node({ name: "Nightly", type: T.schedule })
         .node({ name: "Ask", type: T.slack, parameters: { operation: "sendAndWait" } })
+        .node({ name: "Approved?", type: "n8n-nodes-base.if" })
         .node({ name: "Make", type: T.qbo, parameters: create, credentials: harborCred })
-        .chain("Nightly", "Ask", "Make"),
+        .chain("Nightly", "Ask", "Approved?", "Make"),
       harborOnly,
     );
     expect(ids(r)).not.toContain("RG401");
+    expect(ids(r)).not.toContain("RG403");
   });
 
   it("RG401: still flags the write when one branch skips the approval", () => {

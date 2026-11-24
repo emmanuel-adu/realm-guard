@@ -29,6 +29,8 @@ export interface Workflow {
   nodes: WorkflowNode[];
   edges: Edge[];
   pinnedNodes: string[];
+  /** Connection ends that named no node in the file (some exports key connections by node id). */
+  unresolvedConnections: number;
 }
 
 export interface Tenant {
@@ -63,7 +65,7 @@ export interface Finding {
 
 export type TouchpointKind = "quickbooks-node" | "quickbooks-tool" | "http" | "http-tool";
 
-export type Approval = "gated" | "ungated" | "manual-only" | "not-a-write";
+export type Approval = "gated" | "unchecked" | "ungated" | "manual-only" | "not-a-write";
 
 export interface Touchpoint {
   node: string;
@@ -86,6 +88,8 @@ export interface Coverage {
   nodes: number;
   disabledNodes: string[];
   subWorkflows: string[];
+  /** Nodes from community packages. Listed, not analyzed. */
+  communityNodes: string[];
   /** Things the scan couldn't check, in plain words. Any gap stops a "clear" verdict. */
   gaps: string[];
 }

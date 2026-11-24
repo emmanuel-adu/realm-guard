@@ -25,6 +25,7 @@ const SEVERITY_BG: Record<Severity, string> = {
 
 const APPROVAL_DOT: Record<Approval, string> = {
   ungated: "bg-high",
+  unchecked: "bg-high",
   "manual-only": "bg-medium",
   gated: "bg-clear",
   "not-a-write": "bg-rule-strong",

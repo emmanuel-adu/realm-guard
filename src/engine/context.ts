@@ -8,13 +8,18 @@ export interface Resolved extends RawTouchpoint {
   tenants: string[];
 }
 
+/** Identifies a credential by id when the export has one, so two "QuickBooks Online account"s stay apart. */
+export const credentialKey = (ref: CredentialRef) => (ref.id ? `id:${ref.id}` : `name:${ref.name ?? ""}`);
+
 /**
- * Maps credentials and realm IDs to clients. Without a manifest each distinct credential
- * or company ID stands in for a client, so flows between companies still show up.
+ * Maps credentials and realm IDs to clients. Without a manifest each credential or company ID
+ * stands in for a client, and a company ID used with a credential joins that credential's
+ * client, so flows between companies still show up without inventing ones that aren't there.
  */
 export class Tenancy {
   readonly names = new Map<string, string>();
   private readonly order: string[] = [];
+  private readonly parent = new Map<string, string>();
 
   constructor(readonly manifest: Manifest | undefined) {
     for (const t of manifest?.tenants ?? []) this.add(t.id, t.name);
@@ -27,13 +32,35 @@ export class Tenancy {
     }
   }
 
+  private root(id: string): string {
+    let r = id;
+    while (this.parent.has(r)) r = this.parent.get(r) as string;
+    return r;
+  }
+
+  private pseudoCredential(ref: CredentialRef) {
+    const id = `credential ${credentialKey(ref)}`;
+    this.add(id, credentialLabel(ref));
+    return id;
+  }
+
+  private pseudoRealm(realm: string) {
+    const id = `company ${realm}`;
+    this.add(id, id);
+    return id;
+  }
+
+  /** Without a manifest: treat this credential and company ID as one client. */
+  link(ref: CredentialRef, realm: string) {
+    if (this.manifest) return;
+    const a = this.root(this.pseudoCredential(ref));
+    const b = this.root(this.pseudoRealm(realm));
+    if (a !== b) this.parent.set(b, a);
+  }
+
   credential(ref: CredentialRef | undefined): string[] {
     if (!ref) return [];
-    if (!this.manifest) {
-      const label = credentialLabel(ref);
-      this.add(label, label);
-      return [label];
-    }
+    if (!this.manifest) return [this.root(this.pseudoCredential(ref))];
     const name = ref.name?.trim().toLowerCase();
     return this.manifest.tenants
       .filter((t) => t.credentials.some((c) => (ref.id !== undefined && c === ref.id) || (name !== undefined && c.trim().toLowerCase() === name)))
@@ -41,11 +68,7 @@ export class Tenancy {
   }
 
   realm(id: string): string[] {
-    if (!this.manifest) {
-      const pseudo = `company ${id}`;
-      this.add(pseudo, pseudo);
-      return [pseudo];
-    }
+    if (!this.manifest) return [this.root(this.pseudoRealm(id))];
     return this.manifest.tenants.filter((t) => t.realmIds.includes(id)).map((t) => t.id);
   }
 
@@ -81,12 +104,14 @@ export interface Context {
 export function buildContext(workflow: Workflow, manifest: Manifest | undefined): Context {
   const graph = new Graph(workflow);
   const tenancy = new Tenancy(manifest);
-  const touchpoints: Resolved[] = findTouchpoints(workflow).map((tp) => {
+  const raw = findTouchpoints(workflow);
+  for (const tp of raw) {
+    if (tp.auth.kind === "credential" && tp.auth.credential && tp.realm.kind === "literal") tenancy.link(tp.auth.credential, tp.realm.id);
+  }
+  const touchpoints: Resolved[] = raw.map((tp) => {
     const credTenants = tp.auth.kind === "credential" ? tenancy.credential(tp.auth.credential) : [];
     const realmTenants = tp.realm.kind === "literal" ? tenancy.realm(tp.realm.id) : [];
-    // Without a manifest a call that pins a realm is identified by that realm, not its credential.
-    const tenants = !manifest && realmTenants.length > 0 ? realmTenants : tenancy.sort([...credTenants, ...realmTenants]);
-    return { ...tp, credTenants, realmTenants, tenants };
+    return { ...tp, credTenants, realmTenants, tenants: tenancy.sort([...credTenants, ...realmTenants]) };
   });
 
   const touched = new Set(touchpoints.flatMap((t) => t.tenants));

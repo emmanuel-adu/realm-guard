@@ -40,6 +40,7 @@ export const CATEGORY_LABEL: Record<Category, string> = {
 
 export const APPROVAL_LABEL: Record<Approval, string> = {
   gated: "Waits for a person",
+  unchecked: "Approval not checked",
   ungated: "No approval",
   "manual-only": "Manual run only",
   "not-a-write": "Read only",

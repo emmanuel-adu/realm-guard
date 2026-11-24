@@ -112,6 +112,7 @@ export function SourceCard({ id, label, optional, hint, drop, accept, placeholde
         <button
           id={`${id}-drop`}
           type="button"
+          aria-label={`${label}: ${drop}, or press Enter to browse for a file`}
           aria-describedby={hintId}
           onClick={() => fileInput.current?.click()}
           onDragOver={(e) => {

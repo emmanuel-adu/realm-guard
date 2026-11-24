@@ -56,11 +56,26 @@ export function codeOf(node: WorkflowNode): string {
   return [p.jsCode, p.pythonCode, p.functionCode].filter((v): v is string => typeof v === "string").join("\n");
 }
 
-/** A step that stops the run until a person responds. */
-export function isApprovalStep(node: WorkflowNode, extra: ReadonlySet<string>): boolean {
-  if (extra.has(node.name)) return true;
+/**
+ * A step that stops the run until a person responds. n8n carries on to the next node whatever
+ * the answer (Disapprove arrives as approved: false), so these only count as approval when a
+ * decision node checks the answer before the write. Steps named in the manifest are trusted
+ * as complete review steps.
+ */
+export function approvalKind(node: WorkflowNode, trusted: ReadonlySet<string>): "trusted" | "needs-check" | undefined {
+  if (trusted.has(node.name)) return "trusted";
   const p = node.parameters;
-  if (p.operation === "sendAndWait") return true;
-  if (node.type === "n8n-nodes-base.wait" && (p.resume === "webhook" || p.resume === "form")) return true;
-  return /gotohuman/i.test(node.type);
+  if (p.operation === "sendAndWait") return "needs-check";
+  if (node.type === "n8n-nodes-base.wait" && (p.resume === "webhook" || p.resume === "form")) return "needs-check";
+  if (/gotohuman/i.test(node.type)) return "needs-check";
+  return undefined;
 }
+
+export const isDecision = (type: string) => ["n8n-nodes-base.if", "n8n-nodes-base.switch", "n8n-nodes-base.filter"].includes(type);
+
+export const isCommunityNode = (type: string) => !type.startsWith("n8n-nodes-base.") && !type.startsWith("@n8n/");
+
+export const isMcpClient = (type: string) => /\.mcpClient(Tool)?$/.test(type);
+
+/** Words that suggest a node talks to QuickBooks even when Realm Guard can't read how. */
+export const MENTIONS_QUICKBOOKS = /quickbooks|intuit|\bqbo\b|quickBooksOAuth2Api/i;

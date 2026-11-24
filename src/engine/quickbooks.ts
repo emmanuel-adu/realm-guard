@@ -53,10 +53,13 @@ function qboNodeTouchpoint(node: WorkflowNode): RawTouchpoint {
   };
 }
 
-/** Splits a QBO API URL into the realm segment and the path after it. */
-export function parseQboUrl(raw: string): { realm: RealmSource; path: string } | undefined {
+/**
+ * Splits a QBO API URL into the realm segment and the path after it. `assumeQbo` is set when
+ * the node's credential already marks it as a QuickBooks call, so the host can be hidden.
+ */
+export function parseQboUrl(raw: string, assumeQbo = false): { realm: RealmSource; path: string } | undefined {
   const url = raw.startsWith("=") ? raw.slice(1) : raw;
-  if (!/intuit|quickbooks/i.test(url)) return undefined;
+  if (!assumeQbo && !/intuit|quickbooks|\bqbo/i.test(url)) return undefined;
   const marker = "/v3/company/";
   const at = url.indexOf(marker);
   if (at < 0) return undefined;
@@ -69,9 +72,11 @@ export function parseQboUrl(raw: string): { realm: RealmSource; path: string } |
     segment = /^[^/?#]*/.exec(rest)?.[0] ?? "";
   }
   const after = rest.slice(segment.length).replace(/^\//, "");
-  const path = (/^[^/?#]*/.exec(after)?.[0] ?? "").toLowerCase();
+  const path = (/^[a-z0-9]*/i.exec(after)?.[0] ?? "").toLowerCase();
   let realm: RealmSource;
-  if (segment.includes("{{")) realm = { kind: "expression", expr: segment };
+  // {{ }} expressions, ${} inside a template literal, and {name} placeholders that an agent
+  // fills in on the HTTP Request tool all make the company ID dynamic.
+  if (/[{$]/.test(segment)) realm = { kind: "expression", expr: segment };
   else if (/^\d+$/.test(segment)) realm = { kind: "literal", id: segment };
   else realm = { kind: "unknown" };
   return { realm, path };
@@ -87,6 +92,7 @@ function headersOf(p: Record<string, unknown>): Header[] {
   const lists = [
     (p.headerParameters as { parameters?: unknown } | undefined)?.parameters,
     (p.headerParametersUi as { parameter?: unknown } | undefined)?.parameter,
+    (p.parametersHeaders as { values?: unknown } | undefined)?.values,
   ];
   for (const list of lists) {
     if (!Array.isArray(list)) continue;
@@ -127,9 +133,10 @@ function httpAuth(node: WorkflowNode): AuthSource {
 
 function httpTouchpoint(node: WorkflowNode): RawTouchpoint | undefined {
   const url = str(node.parameters.url) ?? "";
-  // A QuickBooks credential on the node marks it as a QBO call even when the URL is hidden
-  // behind an environment variable or an expression.
-  const parsed = parseQboUrl(url) ?? (QBO_CREDENTIAL_TYPE in node.credentials ? { realm: { kind: "unknown" } as const, path: "" } : undefined);
+  // A QuickBooks credential on the node, or QuickBooks picked as its credential type, marks it
+  // as a QBO call even when the URL is hidden behind a variable or expression.
+  const qboSignal = QBO_CREDENTIAL_TYPE in node.credentials || node.parameters.nodeCredentialType === QBO_CREDENTIAL_TYPE;
+  const parsed = parseQboUrl(url, qboSignal) ?? (qboSignal ? { realm: { kind: "unknown" } as const, path: "" } : undefined);
   if (!parsed) return undefined;
   const method = str(node.parameters.method) ?? str(node.parameters.requestMethod) ?? "GET";
   const dynamicMethod = isExpression(method);

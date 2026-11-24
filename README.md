@@ -54,7 +54,7 @@ Without a manifest you still get the agent, approval and state checks. Each cred
 | **Shared credentials** | | |
 | RG101 | A credential that isn't mapped to any client | High |
 | RG102 | Another client's credential, the classic copied-workflow mistake | Critical |
-| RG103 | A QuickBooks step with no credential in the export | Gap |
+| RG103 | A QuickBooks step with no credential in the export | Medium, and it blocks a clean verdict |
 | RG104 | One credential mapped to, or used against, several clients | High |
 | RG105 | An Authorization header built from workflow data | High, or medium when the token and company ID come from the same lookup |
 | RG106 | A token pasted straight into the node | High |
@@ -71,10 +71,13 @@ Without a manifest you still get the agent, approval and state checks. Each cred
 | **Writes without approval** | | |
 | RG401 | A create, update, delete, send or void with no approval step on the way | High, critical after an AI step, medium for manual-only runs |
 | RG402 | An AI agent write tool with no human review step | Critical |
+| RG403 | An approval step whose answer nothing checks, so Disapprove still posts | High |
 | **Export hygiene** | | |
 | RG501 | Pinned data saved in the export | Low |
 
-An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`.
+An approval step is n8n's Send and Wait (Slack, Gmail, Teams and friends), a Wait node that resumes on a webhook or form, a human review step on an agent tool, or anything you list under `approvalNodes`. n8n moves on after a Send and Wait or a Wait whatever the person answers, so those only count when an IF, Switch or Filter sits between them and the write. Realm Guard checks that one is there, not what its condition says.
+
+Data flow follows n8n: it passes through disabled nodes, and a write that reads `$('Some node')` gets that node's data even from another branch.
 
 The verdict is **Fix before running** if anything is critical or high, **Not verified** if part of the workflow couldn't be checked, **Review before running** for medium and low findings, and **No boundary issues found** only when every QuickBooks step was fully checked and passed. You can copy any report as Markdown.
 
@@ -82,7 +85,7 @@ The verdict is **Fix before running** if anything is critical or high, **Not ver
 
 - It reads the export. It never runs the workflow or calls QuickBooks, so it can't see what happens at run time.
 - It knows the QuickBooks node, its AI-tool version and HTTP Request calls to the QuickBooks API. Xero, Make and Zapier aren't covered yet.
-- Sub-workflows and community nodes are listed, not opened. Scan each sub-workflow on its own.
+- Sub-workflows are listed, not opened. Scan each one on its own. Community nodes are listed too, and Code, community and MCP nodes that mention QuickBooks are flagged for a manual check.
 - Vector stores aren't checked for per-client namespaces yet.
 - When a company ID or token comes from an expression, it can only tell you where it comes from, not whether the lookup is right.
 
@@ -92,9 +95,9 @@ I checked every node type and default against the published n8n packages (`n8n-n
 
 **Assets:** the workflow export and manifest you load. Exports can hold client names, pinned run data and occasionally a pasted token.
 
-**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run.
+**Untrusted inputs:** the workflow file and the manifest, whether dropped, browsed or pasted. Both are parsed as data (JSON and YAML), capped at 5 MB, and never evaluated. Expressions inside the workflow are read as text, never run. YAML aliases are capped, unknown manifest keys are rejected so a typo can't widen the scope, and names are escaped before they go into the Markdown report.
 
-**External systems:** none. The page makes no network requests. Fonts, styles and code are inlined in the one HTML file, and the end-to-end tests fail if the page tries to reach anything outside itself.
+**External systems:** none. Fonts, styles and code are inlined in the one HTML file, and its Content Security Policy (`default-src 'none'`, `connect-src 'none'`) makes the browser refuse any request the page tries to make. The end-to-end tests also fail if anything leaves the page.
 
 **Dangerous actions and their guards:**
 - Copying the report puts client and node names on your clipboard. It only happens when you click Copy.

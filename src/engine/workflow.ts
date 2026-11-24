@@ -45,24 +45,26 @@ function normalizeNode(raw: unknown, index: number): WorkflowNode | string {
   };
 }
 
-function normalizeEdges(raw: unknown, known: Set<string>): Edge[] {
+/** Edges between known nodes, plus how many connection ends named no node in the file. */
+function normalizeEdges(raw: unknown, known: Set<string>): { edges: Edge[]; unresolved: number } {
   const edges: Edge[] = [];
-  if (!isObj(raw)) return edges;
+  let unresolved = 0;
+  if (!isObj(raw)) return { edges, unresolved };
   for (const [from, byType] of Object.entries(raw)) {
-    if (!known.has(from) || !isObj(byType)) continue;
+    if (!isObj(byType)) continue;
     for (const [type, outputs] of Object.entries(byType)) {
       if (!Array.isArray(outputs)) continue;
       for (const output of outputs) {
         if (!Array.isArray(output)) continue;
         for (const target of output) {
-          if (isObj(target) && typeof target.node === "string" && known.has(target.node)) {
-            edges.push({ from, to: target.node, type });
-          }
+          if (!isObj(target) || typeof target.node !== "string") continue;
+          if (known.has(from) && known.has(target.node)) edges.push({ from, to: target.node, type });
+          else unresolved++;
         }
       }
     }
   }
-  return edges;
+  return { edges, unresolved };
 }
 
 export function parseWorkflow(text: string): ParseResult<Workflow> {
@@ -107,14 +109,18 @@ export function parseWorkflow(text: string): ParseResult<Workflow> {
     .filter(([, items]) => (Array.isArray(items) ? items.length > 0 : items != null))
     .map(([node]) => node);
 
+  const { edges, unresolved } = normalizeEdges(data.connections, seen);
+  if (unresolved > 0) warnings.push(`${String(unresolved)} ${unresolved === 1 ? "connection points" : "connections point"} to nodes that aren't in this file, so the order of some steps couldn't be read.`);
+
   return {
     ok: true,
     warnings,
     value: {
       name: typeof data.name === "string" && data.name.trim() ? data.name : "Untitled workflow",
       nodes,
-      edges: normalizeEdges(data.connections, seen),
+      edges,
       pinnedNodes: pinned,
+      unresolvedConnections: unresolved,
     },
   };
 }

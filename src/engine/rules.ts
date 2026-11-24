@@ -1,6 +1,6 @@
-import type { Context, Resolved } from "./context";
+import { type Context, type Resolved, credentialKey } from "./context";
 import { isExpression, referencedNodes, usesFromAI, usesIncomingItem } from "./expressions";
-import { codeOf, isAgent, isAiNode, isApprovalStep, isCodeNode, isHitlReview, isSticky, memoryKind, triggerKind } from "./nodes";
+import { approvalKind, codeOf, isAgent, isAiNode, isCodeNode, isDecision, isHitlReview, isSticky, memoryKind, triggerKind } from "./nodes";
 import { credentialLabel } from "./quickbooks";
 import type { Approval, Finding } from "./types";
 
@@ -26,7 +26,7 @@ function groupBy<T>(items: T[], key: (t: T) => string | undefined): Map<string, 
 const credOf = (tp: Resolved) => (tp.auth.kind === "credential" && tp.auth.credential ? tp.auth.credential : undefined);
 const credKey = (tp: Resolved) => {
   const c = credOf(tp);
-  return c ? credentialLabel(c) : undefined;
+  return c ? credentialKey(c) : undefined;
 };
 
 // ---------------------------------------------------------------------------- credentials
@@ -50,7 +50,11 @@ export function credentialRules(ctx: Context): Finding[] {
     });
   }
 
-  for (const [label, tps] of groupBy(ctx.touchpoints, credKey)) {
+  for (const tps of groupBy(ctx.touchpoints, credKey).values()) {
+    const first = tps[0];
+    const firstCred = first ? credOf(first) : undefined;
+    if (!firstCred) continue;
+    const label = credentialLabel(firstCred);
     const nodes = tps.map((tp) => tp.node.name);
     const owners = tps[0]?.credTenants ?? [];
     if (manifest && owners.length === 0) {
@@ -146,7 +150,9 @@ export function clientIdRules(ctx: Context): Finding[] {
         return n !== undefined && isAiNode(n.type);
       });
       const aiParent = usesIncomingItem(expr) ? graph.mainParents(name).find((p) => isAiNode(graph.node(p)?.type ?? "")) : undefined;
-      const aiSource = usesFromAI(expr) ? "the AI model" : (aiRef ?? aiParent);
+      // The HTTP Request tool fills {placeholders} from the model's own arguments.
+      const placeholder = tp.kind === "http-tool" && /^\{[^{}$]+\}$/.test(expr);
+      const aiSource = usesFromAI(expr) || placeholder ? "the AI model" : (aiRef ?? aiParent);
       out.push({
         ruleId: "RG201",
         category: "client-ids",
@@ -206,15 +212,21 @@ export function clientIdRules(ctx: Context): Finding[] {
 
 // --------------------------------------------------------------------------- cross-client
 
+// An expression that reads nothing from the run ($workflow.id, $vars.x) is the same for every
+// client, so it's as fixed as a typed-in key.
+const fixedKey = (key: string) =>
+  !isExpression(key) || !/\$json|\$input|\$\(|\$node|\$items|\$fromAI|\$execution|\$item\b|\$binary|\$now|\$today|\$runIndex|Math\.random/.test(key);
+
 function memoryKey(node: { typeVersion: number; parameters: Record<string, unknown>; type: string }): string | undefined {
   const p = node.parameters;
   const key = typeof p.sessionKey === "string" ? p.sessionKey : undefined;
-  if (p.sessionIdType === "customKey") return key !== undefined && !isExpression(key) ? key : undefined;
+  if (p.sessionIdType === "customKey") return key !== undefined && fixedKey(key) ? key : undefined;
   if (p.sessionIdType === "fromInput") return undefined;
   // Before version 1.2 there was no "Session ID" choice, only the key field.
   if (node.typeVersion < 1.2) {
-    if (key !== undefined) return isExpression(key) ? undefined : key;
-    if (node.typeVersion < 1.1 && node.type.endsWith("memoryBufferWindow")) return "chat_history";
+    if (key !== undefined) return fixedKey(key) ? key : undefined;
+    // Buffer and Redis memory v1 defaulted to one fixed key for every conversation.
+    if (node.typeVersion < 1.1 && /memoryBufferWindow$|memoryRedisChat$/.test(node.type)) return "chat_history";
   }
   return undefined;
 }
@@ -252,7 +264,7 @@ export function crossClientRules(ctx: Context): Finding[] {
   for (const w of ctx.touchpoints) {
     if (!w.write || w.tenants.length === 0 || w.kind === "quickbooks-tool" || w.kind === "http-tool") continue;
     const sources: Resolved[] = [];
-    for (const anc of graph.ancestors(w.node.name)) {
+    for (const anc of graph.dataSources(w.node.name)) {
       const tp = byNode.get(anc);
       if (tp) sources.push(tp);
       sources.push(...(agentTenants.get(anc) ?? []));
@@ -284,7 +296,9 @@ export function crossClientRules(ctx: Context): Finding[] {
       severity: ctx.multiClient ? "high" : "medium",
       title: "AI memory shared across runs",
       nodes: [n.name, ...graph.attachedTo(n.name)],
-      detail: `${quote(n.name)} stores chat history under the fixed key ${quote(key)}.`,
+      detail: isExpression(key)
+        ? `${quote(n.name)} stores chat history under \`${clip(key)}\`, which is the same on every run.`
+        : `${quote(n.name)} stores chat history under the fixed key ${quote(key)}.`,
       why: ctx.multiClient
         ? "Every client's run reads and writes the same history, so the agent sees earlier clients' data."
         : "If another client's copy of this workflow uses the same memory store and key, the two share history. Copied workflows usually keep the key.",
@@ -316,9 +330,16 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
   const findings: Finding[] = [];
   const approvals = new Map<string, Approval>();
   const { graph } = ctx;
-  const extra = new Set(ctx.manifest?.approvalNodes ?? []);
+  const trusted = new Set(ctx.manifest?.approvalNodes ?? []);
   const nodes = [...graph.byName.values()];
-  const gates = new Set(nodes.filter((n) => isApprovalStep(n, extra)).map((n) => n.name));
+  const kinds = new Map<string, "trusted" | "needs-check">();
+  for (const n of nodes) {
+    const k = approvalKind(n, trusted);
+    if (k) kinds.set(n.name, k);
+  }
+  const gates = new Set(kinds.keys());
+  const trustedGates = new Set([...kinds].filter(([, k]) => k === "trusted").map(([n]) => n));
+  const decisions = new Set(nodes.filter((n) => isDecision(n.type)).map((n) => n.name));
 
   // Entry points: triggers, plus main-flow nodes nothing feeds (a canvas copy or a
   // half-built workflow run with "Execute step").
@@ -334,9 +355,25 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
     if (!isTool && (graph.hasMainEdges(n.name) || tp)) entries.set(n.name, "manual");
   }
 
-  const reachFrom = new Map<string, Set<string>>();
-  for (const e of entries.keys()) reachFrom.set(e, graph.reach([e], gates));
-  const aiOpen = nodes.filter((n) => isAiNode(n.type));
+  // Everything below is computed once per entry, gate and AI step, not once per write: the
+  // per-write version was cubic and froze the tab on large exports.
+  const open = new Map<string, Set<string>>();
+  for (const e of entries.keys()) open.set(e, graph.reach([e], gates));
+  const openAll = new Set<string>();
+  for (const set of open.values()) for (const n of set) openAll.add(n);
+
+  // n8n continues past an approval step whatever the answer, so what follows a gate counts
+  // as approved only once a decision node has checked it.
+  const undecided = new Map<string, string>();
+  for (const [gate, kind] of kinds) {
+    if (kind !== "needs-check") continue;
+    const reached = entries.has(gate) || graph.mainParents(gate).some((p) => openAll.has(p));
+    if (!reached) continue;
+    for (const n of graph.reach(graph.mainChildren(gate), new Set([...decisions, ...trustedGates]))) if (!undecided.has(n)) undecided.set(n, gate);
+  }
+
+  const aiOpen = nodes.filter((n) => isAiNode(n.type) && openAll.has(n.name));
+  const aiReach = new Map(aiOpen.map((a) => [a.name, graph.reach([a.name], gates)]));
 
   for (const tp of ctx.touchpoints) {
     const name = tp.node.name;
@@ -363,29 +400,45 @@ export function approvalRules(ctx: Context): { findings: Finding[]; approvals: M
       continue;
     }
 
-    const reaching = [...entries].filter(([e]) => reachFrom.get(e)?.has(name) === true);
-    if (reaching.length === 0) {
-      approvals.set(name, "gated");
+    if (openAll.has(name)) {
+      const reaching = [...entries].filter(([e]) => open.get(e)?.has(name) === true);
+      const ai = aiOpen.find((a) => aiReach.get(a.name)?.has(name) === true);
+      const automatic = reaching.some(([, kind]) => kind !== "manual");
+      approvals.set(name, automatic || ai ? "ungated" : "manual-only");
+      const how = reaching.map(([e, kind]) => (e === name ? "a manual run of this step" : `${quote(e)} (${TRIGGER_LABEL[kind]})`)).join(", ");
+      findings.push({
+        ruleId: "RG401",
+        category: "approvals",
+        severity: ai ? "critical" : automatic ? "high" : "medium",
+        title: ai ? "AI output posts to the books unreviewed" : "Writes to the books with no approval step",
+        nodes: ai ? [name, ai.name] : [name],
+        detail: `${quote(name)} (${tp.operation}) runs from ${how}${ai ? ` after ${quote(ai.name)} decides what to write` : ""}, and nothing on the way waits for a person.`,
+        why: ai
+          ? "A model's output becomes a ledger entry with no one looking. Confidence scores don't catch a wrong vendor or a wrong amount."
+          : automatic
+            ? "Mistakes post straight to the client's books. They usually surface at month-end close, after reports went out."
+            : "Someone has to click Execute, but nothing shows them what will be posted before it is.",
+        fix: "Add an approval step before this node (Send and Wait in Slack, Gmail or Teams, or a Wait node that resumes on a form) and an IF after it that continues only when the answer is yes. If you use your own review queue, list that node under approvalNodes in the manifest.",
+      });
       continue;
     }
-    const ai = aiOpen.find((a) => reaching.some(([e]) => reachFrom.get(e)?.has(a.name)) && graph.reach([a.name], gates).has(name));
-    const automatic = reaching.some(([, kind]) => kind !== "manual");
-    approvals.set(name, automatic || ai ? "ungated" : "manual-only");
-    const how = reaching.map(([e, kind]) => (e === name ? "a manual run of this step" : `${quote(e)} (${TRIGGER_LABEL[kind]})`)).join(", ");
-    findings.push({
-      ruleId: "RG401",
-      category: "approvals",
-      severity: ai ? "critical" : automatic ? "high" : "medium",
-      title: ai ? "AI output posts to the books unreviewed" : "Writes to the books with no approval step",
-      nodes: ai ? [name, ai.name] : [name],
-      detail: `${quote(name)} (${tp.operation}) runs from ${how}${ai ? ` after ${quote(ai.name)} decides what to write` : ""}, and nothing on the way waits for a person.`,
-      why: ai
-        ? "A model's output becomes a ledger entry with no one looking. Confidence scores don't catch a wrong vendor or a wrong amount."
-        : automatic
-          ? "Mistakes post straight to the client's books. They usually surface at month-end close, after reports went out."
-          : "Someone has to click Execute, but nothing shows them what will be posted before it is.",
-      fix: "Add an approval step before this node: Send and Wait in Slack, Gmail or Teams, or a Wait node that resumes on a form. If you use your own review queue, list that node under approvalNodes in the manifest.",
-    });
+
+    const gate = undecided.get(name);
+    if (gate) {
+      approvals.set(name, "unchecked");
+      findings.push({
+        ruleId: "RG403",
+        category: "approvals",
+        severity: "high",
+        title: "Approval answer is never checked",
+        nodes: [name, gate],
+        detail: `${quote(gate)} asks a person, but nothing checks the answer before ${quote(name)} (${tp.operation}).`,
+        why: "n8n moves on to the next step whatever the person clicks, including Disapprove, a timeout or an error. The approval looks like a safeguard and stops nothing.",
+        fix: "Add an IF after the approval that continues only when it was approved (for Send and Wait, `{{ $json.data.approved }}` is true), and don't wire the approval's error output to the write.",
+      });
+      continue;
+    }
+    approvals.set(name, "gated");
   }
   return { findings, approvals };
 }

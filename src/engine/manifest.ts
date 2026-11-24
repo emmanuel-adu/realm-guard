@@ -41,11 +41,20 @@ export function parseManifest(text: string): ParseResult<Manifest> {
     const reason = (syntax.message.split("\n")[0] ?? "").replace(/ at line \d+, column \d+:?$/, "");
     return { ok: false, errors: [`The manifest has a syntax error${where}: ${reason}`] };
   }
-  const data: unknown = doc.toJS();
+  let data: unknown;
+  try {
+    // maxAliasCount stops "billion laughs" alias bombs; an alias that points nowhere throws.
+    data = doc.toJS({ maxAliasCount: 50 });
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return { ok: false, errors: [`The manifest couldn't be read: ${why.split("\n")[0] ?? ""}. Write values out in full instead of using YAML aliases (*name).`] };
+  }
   if (!isObj(data)) return { ok: false, errors: ["The manifest should be a YAML or JSON object with a tenants list."] };
 
   const errors: string[] = [];
   const warnings: string[] = [];
+  // A misspelled key must fail loudly: an ignored "Scope" would silently allow every client.
+  errors.push(...unknownKeys(data, TOP_KEYS, "The manifest"));
   if (!Array.isArray(data.tenants) || data.tenants.length === 0) {
     return { ok: false, errors: ["The manifest needs at least one tenant under tenants."] };
   }
@@ -60,6 +69,7 @@ export function parseManifest(text: string): ParseResult<Manifest> {
       errors.push(`${label} should be an object with an id.`);
       return;
     }
+    errors.push(...unknownKeys(raw, TENANT_KEYS, label));
     const id = scalar(raw.id);
     if (!id) {
       errors.push(`${label} has no id.`);
@@ -91,6 +101,31 @@ export function parseManifest(text: string): ParseResult<Manifest> {
 
   if (errors.length > 0) return { ok: false, errors };
   return { ok: true, value: { tenants, scope, approvalNodes }, warnings };
+}
+
+const TOP_KEYS = ["version", "scope", "tenants", "approvalNodes"];
+const TENANT_KEYS = ["id", "name", "credentials", "realmIds"];
+
+function distance(a: string, b: string): number {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array<number>(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) (d[0] as number[])[j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      const row = d[i] as number[];
+      const prev = d[i - 1] as number[];
+      row[j] = Math.min((prev[j] as number) + 1, (row[j - 1] as number) + 1, (prev[j - 1] as number) + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+  }
+  return (d[a.length] as number[])[b.length] as number;
+}
+
+function unknownKeys(obj: Obj, known: string[], where: string): string[] {
+  return Object.keys(obj)
+    .filter((k) => !known.includes(k))
+    .map((k) => {
+      const close = known.find((n) => n.toLowerCase() === k.toLowerCase()) ?? known.find((n) => distance(n.toLowerCase(), k.toLowerCase()) <= 2);
+      return `${where} has an unknown key "${k}".${close ? ` Did you mean "${close}"?` : ` Allowed keys: ${known.join(", ")}.`}`;
+    });
 }
 
 const slug = (s: string) =>

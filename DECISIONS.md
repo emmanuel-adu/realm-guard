@@ -22,7 +22,11 @@ We are intentionally not solving (see `ROADMAP.md`):
 - **Node-type knowledge was checked against the published packages** (`n8n-nodes-base` 2.48.5, `@n8n/n8n-nodes-langchain` 2.48.6, `n8n-workflow` 2.48.4), not memory: QuickBooks operations and defaults, the `*Tool` agent-tool types, `*HitlTool` review steps, memory session-key defaults and `sendAndWait`.
 - **Realm IDs are parsed as BigInt from YAML** because they run to 19 digits, past what a JS number holds.
 - **Without a manifest, each credential or company ID stands in for a client.** Cross-company flows and multi-client agents still show up, and the verdict can't be better than "Not verified".
-- **Honest verdicts.** Missing credentials, unreadable company IDs and sub-workflow calls are coverage gaps that block "No boundary issues found".
+- **Honest verdicts.** Missing credentials, unreadable company IDs, sub-workflow calls, unreadable connections and Code, community or MCP nodes that mention QuickBooks are coverage gaps that block "No boundary issues found".
+- **Data flow follows n8n's runtime, not the canvas.** Disabled nodes pass data through, and `$('Node')` references count as data sources even across branches. Both were found by the fresh-eyes review, and both had produced false "clear" verdicts.
+- **An approval needs a decision after it.** n8n continues past Send and Wait whatever the answer, so a write counts as approved only when an IF, Switch or Filter sits between the approval and the write (RG403). The condition itself isn't evaluated.
+- **The manifest is strict.** Unknown keys are rejected with a suggestion, because an ignored `Scope:` would silently allow every client.
+- **The build enforces its privacy promise** with a Content Security Policy that refuses every network request.
 - **TypeScript 6.0, not 7.0**, because `typescript-eslint` supports up to 6.0 and type-aware lint matters more here than the faster compiler.
 - **Fonts self-hosted** with `@fontsource` (IBM Plex Sans and Plex Mono), inlined into the build.
 - Model: none. Every rule is deterministic.

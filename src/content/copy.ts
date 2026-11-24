@@ -55,5 +55,6 @@ export const CHECKS: { category: Category; title: string; body: string }[] = [
 export const LIMITS = [
   "It reads the exported file. It doesn't run the workflow or call QuickBooks.",
   "It checks the QuickBooks node and HTTP Request calls to the QuickBooks API. Xero, Make and Zapier aren't covered yet.",
-  "Sub-workflows and community nodes are listed, not opened.",
+  "Sub-workflows are listed, not opened. Code, community and MCP nodes that mention QuickBooks are flagged for a manual check.",
+  "An approval counts only when an IF, Switch or Filter checks the answer. Realm Guard checks that one is there, not what its condition says.",
 ];
