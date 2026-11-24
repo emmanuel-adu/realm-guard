@@ -128,8 +128,8 @@ The first row that matches wins:
 | Fix before running | Any critical or high finding, even if parts couldn't be checked |
 | Not verified | Any coverage gap. RG103 always adds one. |
 | Review before running | Only medium or low findings, and no gaps |
+| Nothing to check | No QuickBooks steps it recognizes, and no findings |
 | No boundary issues found | No findings and no gaps |
-| Nothing to check | No QuickBooks steps it recognizes |
 
 You can copy any report as Markdown.
 
